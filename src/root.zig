@@ -5,11 +5,10 @@
 //! returned paths/face indices/PostScript identities into Cangjie or another
 //! font engine.
 //!
-//! Platform discovery is optional at deployment time. Linux uses a
-//! runtime-loaded fontconfig provider, macOS uses CoreText, Windows uses
-//! DirectWrite, and unsupported targets fall back to deterministic path
-//! candidates. `metadata_index` provides an opt-in bounded sfnt metadata scan
-//! for callers that need family matching without a native provider.
+//! Discovery is pure Zig: a bounded sfnt metadata index, a fontconfig
+//! configuration reader (Linux), a minimal `cmap` coverage reader, and
+//! deterministic fallback paths. No fontconfig/CoreText/DirectWrite library is
+//! linked.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,53 +22,27 @@ pub const Candidate = types.Candidate;
 pub const Resolution = types.Resolution;
 pub const DiscoveryStats = types.DiscoveryStats;
 pub const MissingGlyph = types.MissingGlyph;
+pub const FallbackFontClass = types.FallbackFontClass;
 pub const MissingGlyphSink = types.MissingGlyphSink;
 pub const Service = types.Service;
+pub const freeFamilyNames = types.freeFamilyNames;
 
 pub const fallback_paths = @import("fallback_paths.zig");
 pub const family = @import("family.zig");
 pub const metadata_index = @import("metadata_index.zig");
 
-const PlatformDiscovery = switch (builtin.target.os.tag) {
-    .linux => @import("linux_fontconfig.zig").Discovery,
-    .macos => @import("macos/core_text.zig").Discovery,
-    .windows => @import("windows/direct_write.zig").Discovery,
-    else => UnavailableDiscovery,
-};
-
-const UnavailableDiscovery = struct {
-    fn init(_: std.mem.Allocator) UnavailableDiscovery {
-        return .{};
-    }
-    fn deinit(_: *UnavailableDiscovery) void {}
-    fn available(_: *const UnavailableDiscovery) bool {
-        return false;
-    }
-    fn resolve(
-        _: *UnavailableDiscovery,
-        allocator: std.mem.Allocator,
-        _: Query,
-    ) !Resolution {
-        return .{
-            .allocator = allocator,
-            .candidates = try allocator.alloc(Candidate, 0),
-            .provider = .fallback_paths,
-        };
-    }
-    fn refresh(_: *UnavailableDiscovery) !bool {
-        return false;
-    }
-    fn stats(_: *UnavailableDiscovery) DiscoveryStats {
-        return .{};
-    }
-};
+const PlatformDiscovery = @import("pure_discovery.zig").Discovery;
 
 pub const Discovery = struct {
+    allocator: std.mem.Allocator,
     platform: PlatformDiscovery,
     missing_glyph_sink: ?*MissingGlyphSink = null,
 
     pub fn init(allocator: std.mem.Allocator) Discovery {
-        return .{ .platform = PlatformDiscovery.init(allocator) };
+        return .{
+            .allocator = allocator,
+            .platform = PlatformDiscovery.init(allocator),
+        };
     }
 
     pub fn deinit(self: *Discovery) void {
@@ -87,7 +60,13 @@ pub const Discovery = struct {
         role: Role,
         language: ?[]const u8,
     ) !Resolution {
-        return try self.platform.resolve(allocator, queryForRole(role, language));
+        const query = queryForRole(role, language);
+        var resolution = try self.platform.resolve(allocator, query);
+        if (resolution.candidates.len == 0) {
+            resolution.deinit();
+            return try fallbackResolution(allocator, role, query);
+        }
+        return resolution;
     }
 
     pub fn resolveQuery(
@@ -95,7 +74,24 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: Query,
     ) !Resolution {
-        return try self.platform.resolve(allocator, query);
+        var platform_query = query;
+        if (query.family.len == 0) {
+            if (query.required_codepoint) |codepoint| {
+                if (fallback_paths.roleForCodepoint(codepoint)) |role| {
+                    platform_query.family = switch (role) {
+                        .emoji => "emoji",
+                        .monospace => "monospace",
+                        .cjk, .symbol, .ui => "sans-serif",
+                    };
+                }
+            }
+        }
+        var resolution = try self.platform.resolve(allocator, platform_query);
+        if (resolution.candidates.len == 0) {
+            resolution.deinit();
+            return try fallbackResolutionForQuery(allocator, query);
+        }
+        return resolution;
     }
 
     pub fn refresh(self: *Discovery) !bool {
@@ -104,6 +100,19 @@ pub const Discovery = struct {
 
     pub fn stats(self: *Discovery) DiscoveryStats {
         return self.platform.stats();
+    }
+
+    /// Enumerate installed family names. Native providers return their own
+    /// catalog; when unavailable, the bounded metadata index is used. Callers
+    /// release the result with `freeFamilyNames`.
+    pub fn allFamilyNames(
+        self: *Discovery,
+        allocator: std.mem.Allocator,
+    ) ![]const []const u8 {
+        const names = try self.platform.allFamilyNames(allocator);
+        if (names.len != 0) return names;
+        freeFamilyNames(allocator, names);
+        return try metadata_index.familyNames(std.Options.debug_io, allocator, .{});
     }
 
     pub fn setMissingGlyphSink(
@@ -117,7 +126,11 @@ pub const Discovery = struct {
         self: *Discovery,
         missing: MissingGlyph,
     ) void {
-        if (self.missing_glyph_sink) |sink| sink.report(sink.context, missing);
+        if (self.missing_glyph_sink) |sink| {
+            var report = missing;
+            if (report.generation == 0) report.generation = self.stats().generation;
+            sink.report(sink.context, report);
+        }
     }
 
     /// Borrow this discovery as the runtime-injectable service contract.
@@ -147,18 +160,16 @@ fn serviceAllFamilyNames(
     context: *anyopaque,
     allocator: std.mem.Allocator,
 ) anyerror![]const []const u8 {
-    _ = context;
-    // Native providers currently resolve descriptors rather than enumerate the
-    // complete inventory. Callers that need a family picker can use
-    // `metadata_index` or a provider-specific extension.
-    return try allocator.alloc([]const u8, 0);
+    const self: *Discovery = @ptrCast(@alignCast(context));
+    return try self.allFamilyNames(allocator);
 }
 
 fn servicePrewarm(context: *anyopaque, queries: []const Query) void {
-    _ = context;
-    _ = queries;
-    // Prewarming is provider-specific; the default implementation leaves
-    // resolution lazy so headless/freestanding builds stay allocation-free.
+    const self: *Discovery = @ptrCast(@alignCast(context));
+    for (queries) |query| {
+        var resolution = self.resolveQuery(self.allocator, query) catch continue;
+        resolution.deinit();
+    }
 }
 
 fn serviceSetMissingGlyphSink(
@@ -194,6 +205,83 @@ pub fn queryForRole(role: Role, language: ?[]const u8) Query {
     };
 }
 
+fn fallbackResolution(
+    allocator: std.mem.Allocator,
+    role: Role,
+    query: Query,
+) !Resolution {
+    const candidates = fallback_paths.forRoleCandidates(
+        role,
+        query.language,
+        query.weight,
+        query.style,
+    );
+    return buildFallbackResolution(allocator, candidates, role == .monospace, query);
+}
+
+fn fallbackResolutionForQuery(
+    allocator: std.mem.Allocator,
+    query: Query,
+) !Resolution {
+    const candidates = fallback_paths.forQuery(query);
+    return buildFallbackResolution(allocator, candidates, false, query);
+}
+
+fn buildFallbackResolution(
+    allocator: std.mem.Allocator,
+    candidates: []const fallback_paths.CandidatePath,
+    monospaced: bool,
+    query: Query,
+) !Resolution {
+    var output: std.ArrayList(Candidate) = .empty;
+    errdefer {
+        for (output.items) |*candidate| candidate.deinit();
+        output.deinit(allocator);
+    }
+    const family_hint = firstFamily(query.family);
+    for (candidates) |candidate| {
+        if (!pathExists(candidate.path)) continue;
+        var resolved = try Candidate.init(
+            allocator,
+            candidate.path,
+            family_hint,
+            null,
+            candidate.face_index,
+            candidate.face_index,
+            0,
+            .fallback_paths,
+        );
+        resolved.setMetadata(
+            if (query.weight >= 600) 700 else 400,
+            query.stretch,
+            query.style,
+            monospaced,
+        );
+        try output.append(allocator, resolved);
+    }
+    return .{
+        .allocator = allocator,
+        .candidates = try output.toOwnedSlice(allocator),
+        .provider = .fallback_paths,
+    };
+}
+
+fn firstFamily(families: []const u8) ?[]const u8 {
+    var iterator = family.FamilyIterator.init(families);
+    while (iterator.next()) |raw_family| {
+        const family_name = std.mem.trim(u8, raw_family, " \t\r\n");
+        if (family_name.len != 0) return family_name;
+    }
+    return null;
+}
+
+fn pathExists(path: []const u8) bool {
+    if (builtin.os.tag == .freestanding) return true;
+    if (!std.fs.path.isAbsolute(path)) return false;
+    std.Io.Dir.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
+    return true;
+}
+
 test "system font role queries carry coverage and language intent" {
     const cjk_query = queryForRole(.cjk, "ja-JP");
     try std.testing.expectEqualStrings("sans-serif", cjk_query.family);
@@ -225,4 +313,18 @@ test "service contract forwards resolution and missing glyph sink" {
     service.setMissingGlyphSink(&sink);
     discovery.reportMissingGlyph(.{ .cluster = "x" });
     try std.testing.expectEqual(@as(usize, 1), reported);
+}
+
+test "fallback resolution returns existing deterministic paths" {
+    var resolution = try fallbackResolutionForQuery(std.testing.allocator, .{
+        .family = "monospace",
+    });
+    defer resolution.deinit();
+    for (resolution.candidates) |candidate| {
+        try std.testing.expect(pathExists(candidate.path));
+    }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

@@ -84,6 +84,43 @@ pub const Cache = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Shared provider resolve path: lock, check the cache, build a miss
+    /// outside the cache, then install a reference-counted entry.
+    pub fn resolveCached(
+        cache: *Cache,
+        mutex: *std.Io.Mutex,
+        allocator: std.mem.Allocator,
+        generation: u64,
+        query: types.Query,
+        owner: anytype,
+    ) !types.Resolution {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        if (try cache.get(query, generation, allocator)) |hit| return hit;
+        var resolution = try owner.resolveUncached(owner.allocator, query);
+        var shared = resolution.intoShared() catch |err| {
+            resolution.deinit();
+            return err;
+        };
+        errdefer shared.deinit();
+        var cache_ref = shared.retain();
+        cache.put(query, generation, cache_ref) catch |err| {
+            cache_ref.deinit();
+            return err;
+        };
+        return shared;
+    }
+
+    pub fn cachedStats(
+        cache: *Cache,
+        mutex: *std.Io.Mutex,
+        generation: u64,
+    ) types.DiscoveryStats {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        return cache.stats(generation);
+    }
+
     pub fn deinit(self: *Cache) void {
         self.clear();
         self.entries.deinit(self.allocator);
@@ -106,6 +143,7 @@ pub const Cache = struct {
             self.stamp +%= 1;
             entry.stamp = self.stamp;
             self.hits += 1;
+            if (entry.resolution.shared != null) return entry.resolution.retain();
             return try entry.resolution.clone(out_allocator);
         }
         self.misses += 1;
@@ -113,7 +151,8 @@ pub const Cache = struct {
     }
 
     /// Adopt `resolution` into the cache. The caller must not deinit it after a
-    /// successful return.
+    /// successful return. The cached entry is reference-counted; later `get`
+    /// calls retain it without copying candidates.
     pub fn put(
         self: *Cache,
         query: types.Query,
@@ -122,15 +161,19 @@ pub const Cache = struct {
     ) !void {
         var key = try Key.init(self.allocator, query);
         errdefer key.deinit();
+        if (self.entries.items.len < max_entries) {
+            try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const shared = try resolution.intoShared();
         self.stamp +%= 1;
         const entry = Entry{
             .key = key,
-            .resolution = resolution,
+            .resolution = shared,
             .generation = generation,
             .stamp = self.stamp,
         };
         if (self.entries.items.len < max_entries) {
-            try self.entries.append(self.allocator, entry);
+            self.entries.appendAssumeCapacity(entry);
             return;
         }
         var oldest: usize = 0;

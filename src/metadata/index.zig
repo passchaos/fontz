@@ -1,0 +1,855 @@
+//! Bounded system-font metadata discovery for concrete `font-family` names.
+//!
+//! The index reads only sfnt headers plus `name`/`OS/2`/`post` tables; it never
+//! rasterizes and never installs a face until a document selects it. Discovery
+//! is opt-in through `ResourcePolicy.allow_system_fonts` because ambient
+//! filesystem access is a caller decision. The process-wide index is bounded by
+//! file, face, per-table and total metadata budgets.
+//!
+//! The index keeps every localized family name plus PostScript/full names and
+//! face attributes so callers can resolve the same face identity that Cangjie
+//! will parse later. Face selection follows the CSS Fonts Level 3 order:
+//! `font-stretch` first, then `font-style`, then `font-weight`.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const family_mod = @import("../family.zig");
+const types = @import("../types.zig");
+const parse = @import("parse.zig");
+const env = @import("../env.zig");
+const test_font = @import("test_font.zig");
+
+pub const LocalizedName = parse.LocalizedName;
+
+pub const Face = struct {
+    /// Absolute path as `root/entry.path` under the scanned font root.
+    path: []const u8,
+    /// Zero-based face inside a TrueType/OpenType collection, otherwise 0.
+    face_index: u32 = 0,
+    /// Preferred English/typographic family name.
+    family: []const u8,
+    /// Every localized family name found in the `name` table. `family` is
+    /// always present in this list.
+    families: []const LocalizedName = &.{},
+    subfamily: []const u8,
+    full_name: []const u8 = "",
+    postscript_name: []const u8 = "",
+    weight: u16 = 400,
+    /// CSS font-stretch percentage (100 is normal).
+    stretch: u16 = 100,
+    /// OpenType `usWidthClass` (1..9, 5 is normal).
+    width_class: u16 = 5,
+    italic: bool = false,
+    style: types.Style = .normal,
+    monospaced: bool = false,
+};
+
+pub const GenericMapping = struct {
+    generic: family_mod.GenericFamily,
+    families: []const []const u8,
+};
+
+pub const Options = struct {
+    /// Override the platform roots (tests and embedders).
+    ///
+    /// Options are fixed after the first successful index build. Call `reset`
+    /// before switching roots or budgets.
+    roots: ?[]const []const u8 = null,
+    max_files: usize = 4096,
+    max_faces: usize = 4096,
+    /// Per-file cap for the `name` table. Larger tables are skipped.
+    max_name_table_bytes: usize = 128 * 1024,
+    /// Total metadata bytes read across the scan.
+    max_total_metadata_bytes: usize = 64 * 1024 * 1024,
+    /// Optional mapping from CSS generic families to concrete family stacks.
+    generic_mappings: []const GenericMapping = &.{},
+};
+
+const Index = struct {
+    arena: std.heap.ArenaAllocator,
+    faces: []const Face,
+    /// Normalized family name -> face indexes.
+    family_index: std.StringHashMapUnmanaged(std.ArrayList(u32)),
+    /// Lower-cased PostScript name -> face index.
+    postscript_index: std.StringHashMapUnmanaged(u32),
+    /// Sorted, unique primary family names.
+    family_names: []const []const u8,
+};
+
+var index_mutex: std.Io.Mutex = .init;
+var index_cache: ?Index = null;
+
+/// Reset the process-wide index. Tests only; the production cache lives for the
+/// process lifetime. Callers must not hold `Face` pointers across this call.
+pub fn resetForTesting(io: std.Io) void {
+    reset(io);
+}
+
+/// Explicitly drop the process-wide index. Callers must not hold `Face`
+/// pointers across this call. `Options` are fixed after the first successful
+/// index build; use this to switch roots/budgets in tests or embedders.
+pub fn reset(io: std.Io) void {
+    index_mutex.lockUncancelable(io);
+    defer index_mutex.unlock(io);
+    if (index_cache) |*cached| cached.arena.deinit();
+    index_cache = null;
+}
+
+/// Find the best installed face for an authored CSS family list.
+///
+/// `stretch` is an OpenType `usWidthClass` (1..9, 5 is normal) for compatibility
+/// with callers that already convert CSS percentages. New code should prefer
+/// `findFace` and pass CSS `stretch`.
+///
+/// Items are considered in order; generic keywords are resolved through
+/// `Options.generic_mappings`. The best face minimizes CSS stretch, style and
+/// weight distance in that order. Returns a pointer into the process-wide
+/// index.
+pub fn findFamily(
+    io: std.Io,
+    families: []const u8,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+    options: Options,
+) ?*const Face {
+    return findFace(io, .{
+        .family = families,
+        .weight = weight,
+        .stretch = family_mod.widthClassToStretch(stretch),
+        .style = if (italic) .italic else .normal,
+    }, options);
+}
+
+/// Find the best installed face for a full descriptor query.
+///
+/// `query.required_codepoint` is accepted for API symmetry but is not verified
+/// here: this index intentionally does not parse `cmap`. Native providers or
+/// Cangjie remain responsible for coverage proof.
+pub fn findFace(io: std.Io, query: types.Query, options: Options) ?*const Face {
+    const index = ensureIndex(io, options) orelse return null;
+    if (query.postscript_name) |requested| {
+        if (findByPostScriptIndex(index, requested)) |face| return face;
+    }
+    var iterator = family_mod.FamilyIterator.init(query.family);
+    while (iterator.next()) |raw_family| {
+        const family = std.mem.trim(u8, raw_family, " \t\r\n");
+        if (family.len == 0) continue;
+        if (family_mod.genericFamily(family)) |generic| {
+            for (options.generic_mappings) |mapping| {
+                if (mapping.generic != generic) continue;
+                for (mapping.families) |mapped| {
+                    if (findConcrete(index, mapped, query)) |face| return face;
+                }
+            }
+            continue;
+        }
+        if (findConcrete(index, family, query)) |face| return face;
+    }
+    return null;
+}
+
+/// Resolve an exact PostScript name to a face.
+pub fn findByPostScript(
+    io: std.Io,
+    postscript_name: []const u8,
+    options: Options,
+) ?*const Face {
+    const index = ensureIndex(io, options) orelse return null;
+    return findByPostScriptIndex(index, postscript_name);
+}
+
+/// Sorted, unique primary family names. Localized names still participate in
+/// `findFace` matching. Callers release the result with
+/// `types.freeFamilyNames`.
+pub fn familyNames(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: Options,
+) ![]const []const u8 {
+    const index = ensureIndex(io, options) orelse return try allocator.alloc([]const u8, 0);
+    const names = try allocator.alloc([]const u8, index.family_names.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (names[0..initialized]) |name| allocator.free(name);
+        allocator.free(names);
+    }
+    for (index.family_names, names) |name, *out| {
+        out.* = try allocator.dupe(u8, name);
+        initialized += 1;
+    }
+    return names;
+}
+
+pub const allFamilyNames = familyNames;
+
+/// Resolve the collection face index for a PostScript name by reading only the
+/// font's metadata. Useful when a caller only has a URL + PostScript identity
+/// and needs a TTC index.
+pub fn findFaceIndexByPostScript(
+    io: std.Io,
+    path: []const u8,
+    postscript_name: []const u8,
+) !?u32 {
+    if (postscript_name.len == 0) return null;
+    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    var persist = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer persist.deinit();
+    const collection = (try parse.readFileMetadata(
+        io,
+        file,
+        scratch.allocator(),
+        persist.allocator(),
+        128 * 1024,
+        64 * 1024 * 1024,
+    )) orelse return null;
+    for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+        if (std.ascii.eqlIgnoreCase(meta.postscript_name, postscript_name)) {
+            return @intCast(face_index);
+        }
+    }
+    return null;
+}
+
+fn findByPostScriptIndex(index: *const Index, requested: []const u8) ?*const Face {
+    var buffer: [256]u8 = undefined;
+    if (normalizePostScriptKeyInto(&buffer, requested)) |key| {
+        if (index.postscript_index.get(key)) |face_index| {
+            if (face_index < index.faces.len) return &index.faces[face_index];
+        }
+        return null;
+    }
+    for (index.faces) |*face| {
+        if (std.ascii.eqlIgnoreCase(face.postscript_name, requested)) return face;
+    }
+    return null;
+}
+
+fn findConcrete(index: *const Index, family: []const u8, query: types.Query) ?*const Face {
+    var buffer: [512]u8 = undefined;
+    if (normalizeFamilyKeyInto(&buffer, family)) |key| {
+        if (key.len == 0) return null;
+        if (index.family_index.get(key)) |candidates| {
+            return selectBestFace(index.faces, candidates.items, query);
+        }
+        return null;
+    }
+    // Extremely long family name: fall back to a linear scan.
+    var indices: std.ArrayList(u32) = .empty;
+    defer indices.deinit(std.heap.page_allocator);
+    for (index.faces, 0..) |*face, face_index| {
+        if (faceMatchesFamily(face, family)) {
+            indices.append(std.heap.page_allocator, @intCast(face_index)) catch return null;
+        }
+    }
+    return selectBestFace(index.faces, indices.items, query);
+}
+
+fn faceMatchesFamily(face: *const Face, family: []const u8) bool {
+    if (family_mod.familyNamesEqual(face.family, family)) return true;
+    for (face.families) |localized| {
+        if (family_mod.familyNamesEqual(localized.name, family)) return true;
+    }
+    return false;
+}
+
+/// CSS Fonts Level 3 face selection over a candidate index list.
+fn selectBestFace(
+    faces: []const Face,
+    indices: []const u32,
+    query: types.Query,
+) ?*const Face {
+    if (indices.len == 0) return null;
+    const stretch = matchingStretch(faces, indices, query.stretch) orelse return null;
+    const style = matchingStyle(faces, indices, stretch, query.style) orelse return null;
+    const weight = matchingWeight(faces, indices, stretch, style, query.weight) orelse return null;
+    for (indices) |index| {
+        if (index >= faces.len) continue;
+        const face = &faces[index];
+        if (face.stretch == stretch and face.style == style and face.weight == weight) {
+            return face;
+        }
+    }
+    return null;
+}
+
+fn matchingStretch(faces: []const Face, indices: []const u32, requested: u16) ?u16 {
+    for (indices) |index| {
+        if (index < faces.len and faces[index].stretch == requested) return requested;
+    }
+    if (requested <= 100) {
+        var below: ?u16 = null;
+        for (indices) |index| {
+            if (index >= faces.len) continue;
+            const value = faces[index].stretch;
+            if (value < requested and (below == null or value > below.?)) below = value;
+        }
+        if (below) |value| return value;
+        var above: ?u16 = null;
+        for (indices) |index| {
+            if (index >= faces.len) continue;
+            const value = faces[index].stretch;
+            if (value > requested and (above == null or value < above.?)) above = value;
+        }
+        return above;
+    }
+    var above: ?u16 = null;
+    for (indices) |index| {
+        if (index >= faces.len) continue;
+        const value = faces[index].stretch;
+        if (value > requested and (above == null or value < above.?)) above = value;
+    }
+    if (above) |value| return value;
+    var below: ?u16 = null;
+    for (indices) |index| {
+        if (index >= faces.len) continue;
+        const value = faces[index].stretch;
+        if (value < requested and (below == null or value > below.?)) below = value;
+    }
+    return below;
+}
+
+fn matchingStyle(
+    faces: []const Face,
+    indices: []const u32,
+    stretch: u16,
+    requested: types.Style,
+) ?types.Style {
+    const preference = switch (requested) {
+        .normal => [_]types.Style{ .normal, .oblique, .italic },
+        .italic => [_]types.Style{ .italic, .oblique, .normal },
+        .oblique => [_]types.Style{ .oblique, .italic, .normal },
+    };
+    for (preference) |style| {
+        for (indices) |index| {
+            if (index >= faces.len) continue;
+            const face = &faces[index];
+            if (face.stretch == stretch and face.style == style) return style;
+        }
+    }
+    return null;
+}
+
+fn matchingWeight(
+    faces: []const Face,
+    indices: []const u32,
+    stretch: u16,
+    style: types.Style,
+    requested: u16,
+) ?u16 {
+    const eligible = struct {
+        fn check(faces_: []const Face, indices_: []const u32, stretch_: u16, style_: types.Style, weight_: u16) bool {
+            for (indices_) |index| {
+                if (index >= faces_.len) continue;
+                const face = &faces_[index];
+                if (face.stretch == stretch_ and face.style == style_ and face.weight == weight_) return true;
+            }
+            return false;
+        }
+    };
+    if (eligible.check(faces, indices, stretch, style, requested)) return requested;
+    if (requested >= 400 and requested < 450 and eligible.check(faces, indices, stretch, style, 500)) {
+        return 500;
+    }
+    if (requested >= 450 and requested <= 500 and eligible.check(faces, indices, stretch, style, 400)) {
+        return 400;
+    }
+    if (requested <= 500) {
+        var below: ?u16 = null;
+        for (indices) |index| {
+            if (index >= faces.len) continue;
+            const face = &faces[index];
+            if (face.stretch != stretch or face.style != style) continue;
+            const value = face.weight;
+            if (value <= requested and (below == null or value > below.?)) below = value;
+        }
+        if (below) |value| return value;
+        var above: ?u16 = null;
+        for (indices) |index| {
+            if (index >= faces.len) continue;
+            const face = &faces[index];
+            if (face.stretch != stretch or face.style != style) continue;
+            const value = face.weight;
+            if (value > requested and (above == null or value < above.?)) above = value;
+        }
+        return above;
+    }
+    var above: ?u16 = null;
+    for (indices) |index| {
+        if (index >= faces.len) continue;
+        const face = &faces[index];
+        if (face.stretch != stretch or face.style != style) continue;
+        const value = face.weight;
+        if (value >= requested and (above == null or value < above.?)) above = value;
+    }
+    if (above) |value| return value;
+    var below: ?u16 = null;
+    for (indices) |index| {
+        if (index >= faces.len) continue;
+        const face = &faces[index];
+        if (face.stretch != stretch or face.style != style) continue;
+        const value = face.weight;
+        if (value < requested and (below == null or value > below.?)) below = value;
+    }
+    return below;
+}
+
+fn ensureIndex(io: std.Io, options: Options) ?*const Index {
+    index_mutex.lockUncancelable(io);
+    if (index_cache != null) {
+        const cached = &index_cache.?;
+        index_mutex.unlock(io);
+        return cached;
+    }
+    index_mutex.unlock(io);
+
+    var built = buildIndex(io, options) catch return null;
+
+    index_mutex.lockUncancelable(io);
+    if (index_cache == null) {
+        index_cache = built;
+    } else {
+        built.arena.deinit();
+    }
+    const cached = if (index_cache) |*value| value else null;
+    index_mutex.unlock(io);
+    return cached;
+}
+
+fn buildIndex(io: std.Io, options: Options) !Index {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+
+    const roots = try collectRoots(io, allocator, options);
+    var faces: std.ArrayList(Face) = .empty;
+    var files_seen: usize = 0;
+    var metadata_bytes: usize = 0;
+    for (roots) |root| {
+        if (files_seen >= options.max_files or
+            faces.items.len >= options.max_faces or
+            metadata_bytes >= options.max_total_metadata_bytes)
+        {
+            break;
+        }
+        var root_dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch continue;
+        defer root_dir.close(io);
+        var walker = root_dir.walk(allocator) catch continue;
+        defer walker.deinit();
+        while (walker.next(io) catch null) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!isFontFile(entry.basename)) continue;
+            if (files_seen >= options.max_files or
+                faces.items.len >= options.max_faces or
+                metadata_bytes >= options.max_total_metadata_bytes)
+            {
+                break;
+            }
+            files_seen += 1;
+            _ = scratch.reset(.retain_capacity);
+            var file = entry.dir.openFile(io, entry.basename, .{}) catch continue;
+            defer file.close(io);
+            const collection = (parse.readFileMetadata(
+                io,
+                file,
+                scratch.allocator(),
+                allocator,
+                options.max_name_table_bytes,
+                options.max_total_metadata_bytes - metadata_bytes,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue,
+            }) orelse continue;
+            metadata_bytes += collection.bytes_read;
+            const path = try std.fs.path.join(allocator, &.{ root, entry.path });
+            for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+                if (faces.items.len >= options.max_faces) break;
+                try faces.append(allocator, .{
+                    .path = path,
+                    .face_index = @intCast(face_index),
+                    .family = meta.family,
+                    .families = meta.families,
+                    .subfamily = meta.subfamily,
+                    .full_name = meta.full_name,
+                    .postscript_name = meta.postscript_name,
+                    .weight = meta.weight,
+                    .stretch = meta.stretch,
+                    .width_class = meta.width_class,
+                    .italic = meta.italic,
+                    .style = meta.style,
+                    .monospaced = meta.monospaced,
+                });
+            }
+        }
+    }
+    const owned_faces = try faces.toOwnedSlice(allocator);
+
+    var family_index: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty;
+    var postscript_index: std.StringHashMapUnmanaged(u32) = .empty;
+    var family_name_set: std.StringHashMapUnmanaged(void) = .empty;
+    for (owned_faces, 0..) |face, face_index| {
+        for (face.families) |localized| {
+            const key = try normalizeFamilyKey(allocator, localized.name);
+            const gop = try family_index.getOrPut(allocator, key);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, @intCast(face_index));
+        }
+        try family_name_set.put(allocator, face.family, {});
+        if (face.postscript_name.len != 0) {
+            const key = try normalizePostScriptKey(allocator, face.postscript_name);
+            const gop = try postscript_index.getOrPut(allocator, key);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(face_index);
+        }
+    }
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var name_iterator = family_name_set.keyIterator();
+    while (name_iterator.next()) |key| try names.append(allocator, key.*);
+    std.mem.sort([]const u8, names.items, {}, lessThanString);
+    const family_names = try names.toOwnedSlice(allocator);
+
+    return .{
+        .arena = arena,
+        .faces = owned_faces,
+        .family_index = family_index,
+        .postscript_index = postscript_index,
+        .family_names = family_names,
+    };
+}
+
+fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn normalizeFamilyKey(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (name) |byte| {
+        if (byte < 0x80 and !std.ascii.isAlphanumeric(byte)) continue;
+        try out.append(allocator, if (byte < 0x80) std.ascii.toLower(byte) else byte);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn normalizeFamilyKeyInto(buffer: []u8, name: []const u8) ?[]const u8 {
+    var len: usize = 0;
+    for (name) |byte| {
+        if (byte < 0x80 and !std.ascii.isAlphanumeric(byte)) continue;
+        if (len == buffer.len) return null;
+        buffer[len] = if (byte < 0x80) std.ascii.toLower(byte) else byte;
+        len += 1;
+    }
+    return buffer[0..len];
+}
+
+fn normalizePostScriptKey(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, name.len);
+    for (name, out) |byte, *dest| dest.* = std.ascii.toLower(byte);
+    return out;
+}
+
+fn normalizePostScriptKeyInto(buffer: []u8, name: []const u8) ?[]const u8 {
+    if (name.len > buffer.len) return null;
+    for (name, buffer[0..name.len]) |byte, *dest| dest.* = std.ascii.toLower(byte);
+    return buffer[0..name.len];
+}
+
+pub const familyNamesEqual = family_mod.familyNamesEqual;
+
+fn isFontFile(basename: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(basename, ".ttf") or
+        std.ascii.endsWithIgnoreCase(basename, ".otf") or
+        std.ascii.endsWithIgnoreCase(basename, ".ttc") or
+        std.ascii.endsWithIgnoreCase(basename, ".otc");
+}
+
+fn platformRoots() []const []const u8 {
+    return switch (builtin.os.tag) {
+        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => &.{
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+        },
+        .macos, .ios, .tvos, .watchos, .visionos => &.{
+            "/System/Library/Fonts",
+            "/System/Library/Fonts/Supplemental",
+            "/Library/Fonts",
+        },
+        .windows => &.{},
+        else => &.{},
+    };
+}
+
+fn collectRoots(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: Options,
+) ![]const []const u8 {
+    if (options.roots) |roots| return roots;
+    var roots: std.ArrayList([]const u8) = .empty;
+    for (platformRoots()) |root| try roots.append(allocator, root);
+    switch (builtin.os.tag) {
+        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => {
+            if (env.get(allocator, "HOME")) |home| {
+                defer allocator.free(home);
+                try appendJoined(allocator, &roots, &.{ home, ".local/share/fonts" });
+                try appendJoined(allocator, &roots, &.{ home, ".fonts" });
+            }
+        },
+        .macos, .ios, .tvos, .watchos, .visionos => {
+            if (env.get(allocator, "HOME")) |home| {
+                defer allocator.free(home);
+                try appendJoined(allocator, &roots, &.{ home, "Library/Fonts" });
+            }
+            try appendJoined(allocator, &roots, &.{"/Network/Library/Fonts"});
+            try appendAssetsV2(io, allocator, &roots);
+        },
+        .windows => {
+            if (env.get(allocator, "WINDIR")) |windir| {
+                defer allocator.free(windir);
+                try appendJoined(allocator, &roots, &.{ windir, "Fonts" });
+            } else {
+                try roots.append(allocator, "C:\\Windows\\Fonts");
+            }
+            if (env.get(allocator, "LOCALAPPDATA")) |local| {
+                defer allocator.free(local);
+                try appendJoined(allocator, &roots, &.{ local, "Microsoft", "Windows", "Fonts" });
+            }
+            if (env.get(allocator, "APPDATA")) |appdata| {
+                defer allocator.free(appdata);
+                try appendJoined(allocator, &roots, &.{ appdata, "Microsoft", "Windows", "Fonts" });
+            } else if (env.get(allocator, "USERPROFILE")) |profile| {
+                defer allocator.free(profile);
+                try appendJoined(allocator, &roots, &.{ profile, "AppData", "Roaming", "Microsoft", "Windows", "Fonts" });
+            }
+        },
+        else => {},
+    }
+    return try roots.toOwnedSlice(allocator);
+}
+
+fn appendJoined(
+    allocator: std.mem.Allocator,
+    roots: *std.ArrayList([]const u8),
+    parts: []const []const u8,
+) !void {
+    const joined = try std.fs.path.join(allocator, parts);
+    errdefer allocator.free(joined);
+    try roots.append(allocator, joined);
+}
+
+fn appendAssetsV2(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    roots: *std.ArrayList([]const u8),
+) !void {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/System/Library/AssetsV2", .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!std.mem.startsWith(u8, entry.name, "com_apple_MobileAsset_Font")) continue;
+        try appendJoined(allocator, roots, &.{ "/System/Library/AssetsV2", entry.name });
+    }
+}
+
+/// Platform font roots including user font directories. Callers own the
+/// returned slice in `allocator`.
+pub fn defaultRoots(io: std.Io, allocator: std.mem.Allocator) ![]const []const u8 {
+    return collectRoots(io, allocator, .{});
+}
+
+test "family comparison ignores separators and case" {
+    try std.testing.expect(familyNamesEqual("Noto Sans", "noto sans"));
+    try std.testing.expect(familyNamesEqual("M PLUS 1p", "Mplus 1p"));
+    try std.testing.expect(!familyNamesEqual("Noto Sans", "Noto Serif"));
+    try std.testing.expect(!familyNamesEqual("宋体", "黑体"));
+}
+
+test "index resolves a family from configured roots" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Test Sans",
+        .subfamily = "Bold Italic",
+        .weight = 700,
+        .italic = true,
+        .postscript_name = "TestSans-BoldItalic",
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "TestSans-BoldItalic.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findFamily(
+        io,
+        "\"Test Sans\", sans-serif",
+        700,
+        true,
+        5,
+        .{ .roots = &roots },
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Test Sans", face.family);
+    try std.testing.expectEqual(@as(u16, 700), face.weight);
+    try std.testing.expect(face.italic);
+    try std.testing.expectEqualStrings("TestSans-BoldItalic", face.postscript_name);
+}
+
+test "CSS matching prefers style over weight distance" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const black = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Probe Sans",
+        .subfamily = "Black",
+        .weight = 900,
+        .postscript_name = "ProbeSans-Black",
+    });
+    defer std.testing.allocator.free(black);
+    const italic = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Probe Sans",
+        .subfamily = "Italic",
+        .weight = 400,
+        .italic = true,
+        .postscript_name = "ProbeSans-Italic",
+    });
+    defer std.testing.allocator.free(italic);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ProbeSans-Black.ttf", .data = black });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ProbeSans-Italic.ttf", .data = italic });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findFace(io, .{
+        .family = "Probe Sans",
+        .weight = 400,
+        .style = .normal,
+    }, .{ .roots = &roots }) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!face.italic);
+    try std.testing.expectEqualStrings("Black", face.subfamily);
+}
+
+test "localized family names resolve" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Localized Sans",
+        .localized_family = .{ .name = "本地化字体", .language = 0x0804 },
+        .postscript_name = "LocalizedSans-Regular",
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "LocalizedSans.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findFace(io, .{ .family = "本地化字体" }, .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Localized Sans", face.family);
+    const names = try familyNames(io, std.testing.allocator, .{ .roots = &roots });
+    defer types.freeFamilyNames(std.testing.allocator, names);
+    var saw_primary = false;
+    for (names) |name| {
+        if (std.mem.eql(u8, name, "Localized Sans")) saw_primary = true;
+    }
+    try std.testing.expect(saw_primary);
+}
+
+test "PostScript lookup and face index helper" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Postscript Sans",
+        .postscript_name = "PostscriptSans-Regular",
+        .monospaced = true,
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "PostscriptSans.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findByPostScript(io, "postscriptsans-regular", .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(face.monospaced);
+    const index = try findFaceIndexByPostScript(io, face.path, "PostscriptSans-Regular");
+    try std.testing.expectEqual(@as(?u32, 0), index);
+}
+
+test "CSS stretch selection prefers the closest class" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const regular = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Stretch Sans",
+        .subfamily = "Regular",
+        .width_class = 5,
+        .postscript_name = "StretchSans-Regular",
+    });
+    defer std.testing.allocator.free(regular);
+    const condensed = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Stretch Sans",
+        .subfamily = "Condensed",
+        .width_class = 3,
+        .postscript_name = "StretchSans-Condensed",
+    });
+    defer std.testing.allocator.free(condensed);
+    try tmp.dir.writeFile(io, .{ .sub_path = "StretchSans-Regular.ttf", .data = regular });
+    try tmp.dir.writeFile(io, .{ .sub_path = "StretchSans-Condensed.ttf", .data = condensed });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findFace(io, .{
+        .family = "Stretch Sans",
+        .stretch = 75,
+    }, .{ .roots = &roots }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 75), face.stretch);
+    try std.testing.expectEqualStrings("Condensed", face.subfamily);
+}
+
+test "TT collection face indexes follow PostScript names" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const regular = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Collection Sans",
+        .subfamily = "Regular",
+        .postscript_name = "CollectionSans-Regular",
+    });
+    defer std.testing.allocator.free(regular);
+    const bold = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Collection Sans",
+        .subfamily = "Bold",
+        .weight = 700,
+        .postscript_name = "CollectionSans-Bold",
+    });
+    defer std.testing.allocator.free(bold);
+    const collection = try test_font.buildTestCollection(std.testing.allocator, &.{ regular, bold });
+    defer std.testing.allocator.free(collection);
+    try tmp.dir.writeFile(io, .{ .sub_path = "CollectionSans.ttc", .data = collection });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+    const face = findByPostScript(io, "CollectionSans-Bold", .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), face.face_index);
+    try std.testing.expectEqual(@as(u16, 700), face.weight);
+    const index = try findFaceIndexByPostScript(io, face.path, "CollectionSans-Bold");
+    try std.testing.expectEqual(@as(?u32, 1), index);
+}
