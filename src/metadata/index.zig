@@ -648,9 +648,11 @@ fn collectFileStamps(
             if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!isFontFile(entry.basename)) continue;
             if (stamps.items.len >= options.max_files) break;
-            var file = entry.dir.openFile(io, entry.basename, .{}) catch continue;
-            defer file.close(io);
-            const stat = file.stat(io) catch continue;
+            // `statFile` resolves the entry through fstatat/statx without
+            // opening it. The previous open+stat pair paid one file open per
+            // installed font on every process launch, which dominated startup
+            // before the persistent metadata cache could even be consulted.
+            const stat = entry.dir.statFile(io, entry.basename, .{}) catch continue;
             const path = try std.fs.path.join(allocator, &.{ root, entry.path });
             try stamps.append(allocator, .{
                 .path = path,
