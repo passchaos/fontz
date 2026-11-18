@@ -29,7 +29,10 @@ libc.
 - `metadata/cmap`: minimal pure-Zig `cmap` coverage reader (formats 0, 4, 6,
   12, 13) used to verify `required_codepoint`.
 - `fallback_paths`: deterministic path candidates for roles, generic families,
-  scripts and CJK TTC face indexes.
+  scripts and CJK TTC face indexes. Codepoint-driven fallback verifies `cmap`
+  coverage before returning a candidate and prefers native macOS faces
+  (Lucida Grande, SF Arabic/Geeza Pro, Thonburi, Kohinoor, PingFang,
+  Hiragino, Apple SD Gothic Neo, Noto Sans Armenian, Apple Color Emoji).
 - `pure_discovery`: combines the above into `Discovery`, with CSS-like family
   matching, platform generic mappings, query caching and reference-counted
   resolutions.

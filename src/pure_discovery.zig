@@ -191,6 +191,9 @@ pub const Discovery = struct {
         for (fallback_paths.forQuery(query)) |fallback| {
             if (candidates.items.len >= query.max_candidates) break;
             if (!pathExists(fallback.path)) continue;
+            if (query.required_codepoint) |codepoint| {
+                if (!(cmap.coversCodepoint(io, fallback.path, fallback.face_index, codepoint) catch false)) continue;
+            }
             if (containsCandidate(candidates.items, fallback.path, fallback.face_index)) continue;
             var candidate = try types.Candidate.init(
                 allocator,

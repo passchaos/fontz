@@ -74,18 +74,21 @@ pub fn forQuery(query: types.Query) []const CandidatePath {
                 .math => &math_candidates,
             };
         }
-        if (roleForFamilyName(name)) |role| {
-            return forRoleCandidates(role, query.language, query.weight, query.style);
+        if (query.required_codepoint == null) {
+            if (roleForFamilyName(name)) |role| {
+                return forRoleCandidates(role, query.language, query.weight, query.style);
+            }
         }
         saw_concrete = true;
     }
     if (query.required_codepoint) |codepoint| {
         if (roleForCodepoint(codepoint)) |role| {
-            return forRoleCandidates(role, query.language, query.weight, query.style);
+            const language = query.language orelse
+                if (role == .cjk) cjkLanguageForCodepoint(codepoint) else null;
+            return forRoleCandidates(role, language, query.weight, query.style);
         }
         if (scriptForCodepoint(codepoint)) |script| return scriptCandidates(script);
-        // The native providers proved that no installed face covers this
-        // codepoint; do not substitute an unrelated UI font.
+        // Unknown/unassigned script: do not substitute an unrelated UI font.
         return &.{};
     }
     if (query.family.len == 0 and !saw_concrete) {
@@ -234,6 +237,14 @@ fn selectStyled(
     if (style != .normal) return italic;
     if (weight >= 600) return bold;
     return regular;
+}
+
+fn cjkLanguageForCodepoint(codepoint: u21) ?[]const u8 {
+    return switch (codepoint) {
+        0x3040...0x30ff, 0x31f0...0x31ff => "ja",
+        0x1100...0x11ff, 0x3130...0x318f, 0xac00...0xd7af => "ko",
+        else => null,
+    };
 }
 
 fn startsWithLanguage(language: []const u8, prefix: []const u8) bool {
@@ -520,6 +531,7 @@ const cjk_ja_regular = [_]CandidatePath{
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", .face_index = 0 },
     .{ .path = "/System/Library/Fonts/Hiragino Sans GB.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\msgothic.ttc" },
 };
 
@@ -534,6 +546,8 @@ const cjk_ko_regular = [_]CandidatePath{
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", .face_index = 1 },
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", .face_index = 1 },
+    .{ .path = "/System/Library/Fonts/AppleSDGothicNeo.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\malgun.ttf" },
 };
 
@@ -548,6 +562,9 @@ const cjk_sc_regular = [_]CandidatePath{
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", .face_index = 2 },
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", .face_index = 2 },
+    .{ .path = "/System/Library/PrivateFrameworks/FontServices.framework/Versions/Current/Resources/Reserved/PingFangUI.ttc", .face_index = 20 },
+    .{ .path = "/System/Library/Fonts/Hiragino Sans GB.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\msyh.ttc" },
 };
 
@@ -562,6 +579,9 @@ const cjk_tc_regular = [_]CandidatePath{
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", .face_index = 3 },
     .{ .path = "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", .face_index = 3 },
+    .{ .path = "/System/Library/PrivateFrameworks/FontServices.framework/Versions/Current/Resources/Reserved/PingFangUI.ttc", .face_index = 21 },
+    .{ .path = "/System/Library/Fonts/Hiragino Sans GB.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
     .{ .path = "/usr/share/fonts/truetype/arphic/uming.ttc" },
     .{ .path = "C:\\Windows\\Fonts\\msjh.ttc" },
 };
@@ -588,6 +608,8 @@ const cjk_hk_bold = [_]CandidatePath{
 };
 
 const arabic_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/SFArabic.ttf" },
+    .{ .path = "/System/Library/Fonts/GeezaPro.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\segoeui.ttf" },
@@ -596,12 +618,15 @@ const arabic_candidates = [_]CandidatePath{
 };
 
 const hebrew_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/LucidaGrande.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf" },
     .{ .path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
 };
 
 const thai_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/ThonburiUI.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Thonburi.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf" },
     .{ .path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\LeelawadeeUI.ttf" },
@@ -609,12 +634,14 @@ const thai_candidates = [_]CandidatePath{
 };
 
 const devanagari_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Kohinoor.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\Nirmala.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
 };
 
 const bengali_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/KohinoorBangla.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\Nirmala.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
@@ -627,6 +654,7 @@ const tamil_candidates = [_]CandidatePath{
 };
 
 const telugu_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/KohinoorTelugu.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\Nirmala.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
@@ -645,6 +673,7 @@ const malayalam_candidates = [_]CandidatePath{
 };
 
 const gujarati_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/KohinoorGujarati.ttc" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansGujarati-Regular.ttf" },
     .{ .path = "C:\\Windows\\Fonts\\Nirmala.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
@@ -686,6 +715,8 @@ const georgian_candidates = [_]CandidatePath{
 };
 
 const armenian_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/NotoSansArmenian.ttc" },
+    .{ .path = "/System/Library/Fonts/SFArmenian.ttf" },
     .{ .path = "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf" },
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
 };

@@ -214,3 +214,36 @@ test "fontz keeps CSS weight policy where Core Text differs" {
     if (resolution.candidates.len == 0) return;
     try std.testing.expectEqualStrings("STHeitiSC-Medium", resolution.candidates[0].postscript_name.?);
 }
+
+test "fontz fallback chooses a covering macOS system font" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var discovery = fontz.Discovery.init(std.testing.allocator);
+    defer discovery.deinit();
+    const cases = [_]struct { codepoint: u21, expected: []const u8 }{
+        .{ .codepoint = 0x05d0, .expected = "Lucida" },
+        .{ .codepoint = 0x0633, .expected = "Arabic" },
+        .{ .codepoint = 0x0e01, .expected = "Thonburi" },
+        .{ .codepoint = 0x0905, .expected = "Kohinoor" },
+        .{ .codepoint = 0x4e2d, .expected = "PingFang" },
+        .{ .codepoint = 0x3042, .expected = "Hiragino" },
+        .{ .codepoint = 0xac00, .expected = "Gothic" },
+        .{ .codepoint = 0x1f600, .expected = "Emoji" },
+        .{ .codepoint = 0x0531, .expected = "Armenian" },
+    };
+    for (cases) |case| {
+        var resolution = try discovery.resolveQuery(std.testing.allocator, .{
+            .family = "Helvetica",
+            .required_codepoint = case.codepoint,
+        });
+        defer resolution.deinit();
+        if (resolution.candidates.len == 0) {
+            std.debug.print("no fallback for U+{X:0>4}\n", .{case.codepoint});
+            return error.TestUnexpectedResult;
+        }
+        const path = resolution.candidates[0].path;
+        if (std.mem.indexOf(u8, path, case.expected) == null) {
+            std.debug.print("U+{X:0>4}: expected {s}, got {s}\n", .{ case.codepoint, case.expected, path });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

@@ -13,6 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
+const cmap = @import("metadata/cmap.zig");
 
 pub const Role = types.Role;
 pub const Provider = types.Provider;
@@ -261,6 +262,9 @@ fn buildFallbackResolution(
     const family_hint = firstFamily(query.family);
     for (candidates) |candidate| {
         if (!pathExists(candidate.path)) continue;
+        if (query.required_codepoint) |codepoint| {
+            if (!(cmap.coversCodepoint(std.Options.debug_io, candidate.path, candidate.face_index, codepoint) catch false)) continue;
+        }
         var resolved = try Candidate.init(
             allocator,
             candidate.path,
