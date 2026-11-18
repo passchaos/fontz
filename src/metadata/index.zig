@@ -784,6 +784,40 @@ test "index matches fvar named instances by weight" {
     try std.testing.expectEqual(@as(u16, 700), bold.weight);
 }
 
+test "index keeps more than 128 fvar instances" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instances: [130]test_font.TestInstance = undefined;
+    var subfamily_buf: [130][8]u8 = undefined;
+    var postscript_buf: [130][16]u8 = undefined;
+    for (&instances, 0..) |*instance, index| {
+        const weight: f32 = @floatFromInt(100 + index);
+        instance.* = .{
+            .subfamily = try std.fmt.bufPrint(&subfamily_buf[index], "W{d}", .{100 + index}),
+            .postscript_name = try std.fmt.bufPrint(&postscript_buf[index], "Many-{d}", .{100 + index}),
+            .weight = weight,
+        };
+    }
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Many Instances",
+        .postscript_name = "Many-Regular",
+        .instances = &instances,
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "Many.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+
+    const face = findFamily(io, "Many Instances", 229, false, 5, .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 130), face.named_instance);
+    try std.testing.expectEqualStrings("Many-229", face.postscript_name);
+}
+
 test "CSS matching prefers style over weight distance" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});

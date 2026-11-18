@@ -229,7 +229,10 @@ pub fn readSfntMetadata(
     };
 }
 
-const max_named_instances = 128;
+// SFNS.ttf currently declares 369 named instances. Keep enough headroom to
+// cover optical-size/width combinations without letting hostile fonts allocate
+// unbounded metadata.
+const max_named_instances = 512;
 
 const FvarAxis = struct {
     tag: [4]u8,
