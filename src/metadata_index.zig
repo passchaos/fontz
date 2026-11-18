@@ -11,6 +11,7 @@ pub const Face = index.Face;
 pub const GenericMapping = index.GenericMapping;
 pub const Options = index.Options;
 pub const prewarm = index.prewarm;
+pub const lastBuildUsedCache = index.lastBuildUsedCache;
 pub const resetForTesting = index.resetForTesting;
 pub const reset = index.reset;
 pub const findFamily = index.findFamily;

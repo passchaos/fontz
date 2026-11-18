@@ -19,7 +19,10 @@ libc.
   `Candidate.named_instance` is `0` for the default instance and `N` for the
   zero-based instance `N - 1`. Dot-prefixed families are treated as hidden
   CoreText-style aliases: addressable by PostScript name, excluded from family
-  matching and family listings.
+  matching and family listings. A versioned metadata cache lives under the
+  platform cache directory (`~/Library/Caches/fontz/metadata-v1.bin` on macOS)
+  and is validated against the root list plus every font file's path, size, and
+  mtime; writes are atomic and any mismatch falls back to a full scan.
 - `metadata/fontconfig`: pure-Zig reader for fontconfig XML configuration
   (`<dir>`, `<include>`, `<alias>`), including XDG and `~` prefixes. Used on
   Linux to discover configured font directories and generic-family aliases.

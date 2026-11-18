@@ -18,6 +18,7 @@ const types = @import("../types.zig");
 const parse = @import("parse.zig");
 const env = @import("../env.zig");
 const test_font = @import("test_font.zig");
+const metadata_cache = @import("index_cache.zig");
 
 pub const LocalizedName = parse.LocalizedName;
 
@@ -66,6 +67,10 @@ pub const Options = struct {
     max_total_metadata_bytes: usize = 64 * 1024 * 1024,
     /// Optional mapping from CSS generic families to concrete family stacks.
     generic_mappings: []const GenericMapping = &.{},
+    /// Override the persistent metadata cache path (tests and embedders).
+    cache_path: ?[]const u8 = null,
+    /// Disable the persistent metadata cache for this build.
+    enable_cache: bool = true,
 };
 
 const Index = struct {
@@ -81,6 +86,9 @@ const Index = struct {
 
 var index_mutex: std.Io.Mutex = .init;
 var index_cache: ?Index = null;
+/// Whether the most recent successful index build came from the disk cache.
+/// Diagnostics/tests only; not a synchronization primitive.
+var last_index_from_cache: bool = false;
 
 /// Reset the process-wide index. Tests only; the production cache lives for the
 /// process lifetime. Callers must not hold `Face` pointers across this call.
@@ -93,6 +101,11 @@ pub fn resetForTesting(io: std.Io) void {
 /// not pay the cold scan. Returns false when the index could not be built.
 pub fn prewarm(io: std.Io, options: Options) bool {
     return ensureIndex(io, options) != null;
+}
+
+/// Whether the most recent build reused the persistent metadata cache.
+pub fn lastBuildUsedCache() bool {
+    return last_index_from_cache;
 }
 
 /// Explicitly drop the process-wide index. Callers must not hold `Face`
@@ -437,91 +450,108 @@ fn buildIndex(io: std.Io, options: Options) !Index {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer scratch.deinit();
 
     const roots = try collectRoots(io, allocator, options);
+    const stamps = try collectFileStamps(io, allocator, roots, options);
+    const limits_hash = optionsLimitsHash(options);
+    const cache_path = resolveCachePath(allocator, options);
+    last_index_from_cache = false;
+    if (cache_path) |path| {
+        if (try metadata_cache.load(
+            Face,
+            io,
+            allocator,
+            path,
+            roots,
+            stamps,
+            limits_hash,
+        )) |faces| {
+            last_index_from_cache = true;
+            return try finishIndex(&arena, faces);
+        }
+    }
+
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
     var faces: std.ArrayList(Face) = .empty;
-    var files_seen: usize = 0;
     var metadata_bytes: usize = 0;
-    for (roots) |root| {
-        if (files_seen >= options.max_files or
-            faces.items.len >= options.max_faces or
+    for (stamps) |stamp| {
+        if (faces.items.len >= options.max_faces or
             metadata_bytes >= options.max_total_metadata_bytes)
         {
             break;
         }
-        var root_dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch continue;
-        defer root_dir.close(io);
-        var walker = root_dir.walk(allocator) catch continue;
-        defer walker.deinit();
-        while (walker.next(io) catch null) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (!isFontFile(entry.basename)) continue;
-            if (files_seen >= options.max_files or
-                faces.items.len >= options.max_faces or
-                metadata_bytes >= options.max_total_metadata_bytes)
-            {
-                break;
-            }
-            files_seen += 1;
-            _ = scratch.reset(.retain_capacity);
-            var file = entry.dir.openFile(io, entry.basename, .{}) catch continue;
-            defer file.close(io);
-            const collection = (parse.readFileMetadata(
-                io,
-                file,
-                scratch.allocator(),
-                allocator,
-                options.max_name_table_bytes,
-                options.max_total_metadata_bytes - metadata_bytes,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => continue,
-            }) orelse continue;
-            metadata_bytes += collection.bytes_read;
-            const path = try std.fs.path.join(allocator, &.{ root, entry.path });
-            for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+        _ = scratch.reset(.retain_capacity);
+        var file = std.Io.Dir.openFileAbsolute(io, stamp.path, .{}) catch continue;
+        defer file.close(io);
+        const collection = (parse.readFileMetadata(
+            io,
+            file,
+            scratch.allocator(),
+            allocator,
+            options.max_name_table_bytes,
+            options.max_total_metadata_bytes - metadata_bytes,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        }) orelse continue;
+        metadata_bytes += collection.bytes_read;
+        for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+            if (faces.items.len >= options.max_faces) break;
+            try faces.append(allocator, .{
+                .path = stamp.path,
+                .face_index = @intCast(face_index),
+                .family = meta.family,
+                .families = meta.families,
+                .subfamily = meta.subfamily,
+                .full_name = meta.full_name,
+                .postscript_name = meta.postscript_name,
+                .weight = meta.weight,
+                .stretch = meta.stretch,
+                .width_class = meta.width_class,
+                .italic = meta.italic,
+                .style = meta.style,
+                .monospaced = meta.monospaced,
+            });
+            for (meta.instances) |instance| {
                 if (faces.items.len >= options.max_faces) break;
                 try faces.append(allocator, .{
-                    .path = path,
+                    .path = stamp.path,
                     .face_index = @intCast(face_index),
+                    .named_instance = @intCast(@as(usize, instance.index) + 1),
                     .family = meta.family,
                     .families = meta.families,
-                    .subfamily = meta.subfamily,
+                    .subfamily = instance.subfamily,
                     .full_name = meta.full_name,
-                    .postscript_name = meta.postscript_name,
-                    .weight = meta.weight,
-                    .stretch = meta.stretch,
+                    .postscript_name = instance.postscript_name,
+                    .weight = instance.weight,
+                    .stretch = instance.stretch,
                     .width_class = meta.width_class,
-                    .italic = meta.italic,
-                    .style = meta.style,
+                    .italic = instance.style != .normal,
+                    .style = instance.style,
                     .monospaced = meta.monospaced,
                 });
-                for (meta.instances) |instance| {
-                    if (faces.items.len >= options.max_faces) break;
-                    try faces.append(allocator, .{
-                        .path = path,
-                        .face_index = @intCast(face_index),
-                        .named_instance = @intCast(@as(usize, instance.index) + 1),
-                        .family = meta.family,
-                        .families = meta.families,
-                        .subfamily = instance.subfamily,
-                        .full_name = meta.full_name,
-                        .postscript_name = instance.postscript_name,
-                        .weight = instance.weight,
-                        .stretch = instance.stretch,
-                        .width_class = meta.width_class,
-                        .italic = instance.style != .normal,
-                        .style = instance.style,
-                        .monospaced = meta.monospaced,
-                    });
-                }
             }
         }
     }
     const owned_faces = try faces.toOwnedSlice(allocator);
+    if (cache_path) |path| {
+        metadata_cache.store(
+            Face,
+            io,
+            scratch.allocator(),
+            path,
+            roots,
+            stamps,
+            owned_faces,
+            limits_hash,
+        );
+    }
+    return try finishIndex(&arena, owned_faces);
+}
 
+fn finishIndex(arena: *std.heap.ArenaAllocator, owned_faces: []const Face) !Index {
+    const allocator = arena.allocator();
     var family_index: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty;
     var postscript_index: std.StringHashMapUnmanaged(u32) = .empty;
     var family_name_set: std.StringHashMapUnmanaged(void) = .empty;
@@ -553,12 +583,98 @@ fn buildIndex(io: std.Io, options: Options) !Index {
     const family_names = try names.toOwnedSlice(allocator);
 
     return .{
-        .arena = arena,
+        .arena = arena.*,
         .faces = owned_faces,
         .family_index = family_index,
         .postscript_index = postscript_index,
         .family_names = family_names,
     };
+}
+
+fn collectFileStamps(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    roots: []const []const u8,
+    options: Options,
+) ![]const metadata_cache.FileStamp {
+    var stamps: std.ArrayList(metadata_cache.FileStamp) = .empty;
+    for (roots) |root| {
+        if (stamps.items.len >= options.max_files) break;
+        var root_dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch continue;
+        defer root_dir.close(io);
+        var walker = root_dir.walk(allocator) catch continue;
+        defer walker.deinit();
+        while (walker.next(io) catch null) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!isFontFile(entry.basename)) continue;
+            if (stamps.items.len >= options.max_files) break;
+            var file = entry.dir.openFile(io, entry.basename, .{}) catch continue;
+            defer file.close(io);
+            const stat = file.stat(io) catch continue;
+            const path = try std.fs.path.join(allocator, &.{ root, entry.path });
+            try stamps.append(allocator, .{
+                .path = path,
+                .mtime_ns = stat.mtime.nanoseconds,
+                .size = stat.size,
+            });
+        }
+    }
+    std.mem.sort(metadata_cache.FileStamp, stamps.items, {}, lessThanStamp);
+    return try stamps.toOwnedSlice(allocator);
+}
+
+fn lessThanStamp(_: void, a: metadata_cache.FileStamp, b: metadata_cache.FileStamp) bool {
+    return std.mem.order(u8, a.path, b.path) == .lt;
+}
+
+fn optionsLimitsHash(options: Options) u64 {
+    var hash = std.hash.Wyhash.init(metadata_cache.version);
+    hash.update(std.mem.asBytes(&options.max_files));
+    hash.update(std.mem.asBytes(&options.max_faces));
+    hash.update(std.mem.asBytes(&options.max_name_table_bytes));
+    hash.update(std.mem.asBytes(&options.max_total_metadata_bytes));
+    return hash.final();
+}
+
+fn resolveCachePath(allocator: std.mem.Allocator, options: Options) ?[]const u8 {
+    if (options.cache_path) |path| return path;
+    if (!options.enable_cache) return null;
+    // Explicit roots are tests/embedders; do not write their synthetic catalog
+    // into the user's real cache directory.
+    if (options.roots != null) return null;
+    switch (builtin.os.tag) {
+        .windows => {
+            const local = env.get(allocator, "LOCALAPPDATA") orelse return null;
+            defer allocator.free(local);
+            const dir = std.fs.path.join(allocator, &.{ local, "fontz" }) catch return null;
+            defer allocator.free(dir);
+            return std.fs.path.join(allocator, &.{ dir, "metadata-v1.bin" }) catch null;
+        },
+        .macos, .ios, .tvos, .watchos, .visionos => {
+            const home = env.get(allocator, "HOME") orelse return null;
+            defer allocator.free(home);
+            const dir = std.fs.path.join(allocator, &.{ home, "Library", "Caches", "fontz" }) catch return null;
+            defer allocator.free(dir);
+            return std.fs.path.join(allocator, &.{ dir, "metadata-v1.bin" }) catch null;
+        },
+        else => {
+            const cache_home = env.get(allocator, "XDG_CACHE_HOME");
+            defer if (cache_home) |value| allocator.free(value);
+            const base = cache_home orelse blk: {
+                const home = env.get(allocator, "HOME") orelse return null;
+                const cache = std.fs.path.join(allocator, &.{ home, ".cache" }) catch {
+                    allocator.free(home);
+                    return null;
+                };
+                allocator.free(home);
+                break :blk cache;
+            };
+            defer allocator.free(base);
+            const dir = std.fs.path.join(allocator, &.{ base, "fontz" }) catch return null;
+            defer allocator.free(dir);
+            return std.fs.path.join(allocator, &.{ dir, "metadata-v1.bin" }) catch null;
+        },
+    }
 }
 
 fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
@@ -782,6 +898,48 @@ test "index matches fvar named instances by weight" {
     try std.testing.expectEqualStrings("VariableSans-Bold", bold.postscript_name);
     try std.testing.expectEqual(@as(u16, 2), bold.named_instance);
     try std.testing.expectEqual(@as(u16, 700), bold.weight);
+}
+
+test "metadata cache round-trips and invalidates on file changes" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Cache Sans",
+        .postscript_name = "CacheSans-Regular",
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "CacheSans.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    const cache_path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..root_len], "cache.bin" });
+    defer std.testing.allocator.free(cache_path);
+    const options = Options{ .roots = &roots, .cache_path = cache_path };
+
+    resetForTesting(io);
+    defer resetForTesting(io);
+    _ = findFamily(io, "Cache Sans", 400, false, 5, options) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!lastBuildUsedCache());
+
+    resetForTesting(io);
+    _ = findFamily(io, "Cache Sans", 400, false, 5, options) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(lastBuildUsedCache());
+
+    // A changed font file changes the stamp (and file size), so the next build
+    // must ignore the stale cache.
+    const changed = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Cache Sans Extended",
+        .postscript_name = "CacheSansExtended-Regular",
+    });
+    defer std.testing.allocator.free(changed);
+    try tmp.dir.writeFile(io, .{ .sub_path = "CacheSans.ttf", .data = changed });
+    resetForTesting(io);
+    _ = findFamily(io, "Cache Sans Extended", 400, false, 5, options) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!lastBuildUsedCache());
 }
 
 test "index keeps more than 128 fvar instances" {
