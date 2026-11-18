@@ -89,6 +89,9 @@ var index_cache: ?Index = null;
 /// Whether the most recent successful index build came from the disk cache.
 /// Diagnostics/tests only; not a synchronization primitive.
 var last_index_from_cache: bool = false;
+/// Bumped whenever the process-wide index is dropped; query caches include it
+/// so an external font-change reset invalidates cached resolutions.
+var index_generation: u64 = 1;
 
 /// Reset the process-wide index. Tests only; the production cache lives for the
 /// process lifetime. Callers must not hold `Face` pointers across this call.
@@ -116,6 +119,13 @@ pub fn reset(io: std.Io) void {
     defer index_mutex.unlock(io);
     if (index_cache) |*cached| cached.arena.deinit();
     index_cache = null;
+    index_generation +%= 1;
+    if (index_generation == 0) index_generation = 1;
+}
+
+/// Current process-wide index generation.
+pub fn generation() u64 {
+    return index_generation;
 }
 
 /// Find the best installed face for an authored CSS family list.

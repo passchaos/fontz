@@ -64,6 +64,7 @@ const Entry = struct {
     key: Key,
     resolution: types.Resolution,
     generation: u64,
+    index_generation: u64,
     stamp: u64,
 
     fn deinit(self: *Entry) void {
@@ -91,12 +92,13 @@ pub const Cache = struct {
         mutex: *std.Io.Mutex,
         allocator: std.mem.Allocator,
         generation: u64,
+        index_generation: u64,
         query: types.Query,
         owner: anytype,
     ) !types.Resolution {
         mutex.lockUncancelable(std.Options.debug_io);
         defer mutex.unlock(std.Options.debug_io);
-        if (try cache.get(query, generation, allocator)) |hit| return hit;
+        if (try cache.get(query, generation, index_generation, allocator)) |hit| return hit;
         var resolution = try owner.resolveUncached(owner.allocator, query);
         var shared = resolution.intoShared() catch |err| {
             resolution.deinit();
@@ -104,7 +106,7 @@ pub const Cache = struct {
         };
         errdefer shared.deinit();
         var cache_ref = shared.retain();
-        cache.put(query, generation, cache_ref) catch |err| {
+        cache.put(query, generation, index_generation, cache_ref) catch |err| {
             cache_ref.deinit();
             return err;
         };
@@ -136,10 +138,13 @@ pub const Cache = struct {
         self: *Cache,
         query: types.Query,
         generation: u64,
+        index_generation: u64,
         out_allocator: std.mem.Allocator,
     ) !?types.Resolution {
         for (self.entries.items) |*entry| {
-            if (entry.generation != generation or !entry.key.eql(query)) continue;
+            if (entry.generation != generation or
+                entry.index_generation != index_generation or
+                !entry.key.eql(query)) continue;
             self.stamp +%= 1;
             entry.stamp = self.stamp;
             self.hits += 1;
@@ -157,6 +162,7 @@ pub const Cache = struct {
         self: *Cache,
         query: types.Query,
         generation: u64,
+        index_generation: u64,
         resolution: types.Resolution,
     ) !void {
         var key = try Key.init(self.allocator, query);
@@ -170,6 +176,7 @@ pub const Cache = struct {
             .key = key,
             .resolution = shared,
             .generation = generation,
+            .index_generation = index_generation,
             .stamp = self.stamp,
         };
         if (self.entries.items.len < max_entries) {
@@ -214,25 +221,28 @@ test "query cache owns positive and negative resolutions" {
         0,
         .fontconfig,
     );
-    try cache.put(query, 1, .{
+    try cache.put(query, 1, 0, .{
         .allocator = std.testing.allocator,
         .candidates = candidates,
         .provider = .fontconfig,
     });
-    var hit = (try cache.get(query, 1, std.testing.allocator)).?;
+    var hit = (try cache.get(query, 1, 0, std.testing.allocator)).?;
     defer hit.deinit();
     try std.testing.expectEqualStrings("Example Sans", hit.candidates[0].family.?);
 
     const missing_query = types.Query{ .family = "Missing" };
-    try cache.put(missing_query, 1, .{
+    try cache.put(missing_query, 1, 0, .{
         .allocator = std.testing.allocator,
         .candidates = try std.testing.allocator.alloc(types.Candidate, 0),
         .provider = .fontconfig,
     });
-    var missing = (try cache.get(missing_query, 1, std.testing.allocator)).?;
+    var missing = (try cache.get(missing_query, 1, 0, std.testing.allocator)).?;
     defer missing.deinit();
     try std.testing.expectEqual(@as(usize, 0), missing.candidates.len);
     const stats = cache.stats(1);
     try std.testing.expectEqual(@as(u64, 2), stats.cache_hits);
     try std.testing.expectEqual(@as(usize, 2), stats.cache_entries);
+
+    // A new process-wide index generation invalidates every cached query.
+    try std.testing.expect((try cache.get(query, 1, 1, std.testing.allocator)) == null);
 }

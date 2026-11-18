@@ -83,6 +83,7 @@ pub const Discovery = struct {
             &self.mutex,
             allocator,
             self.generation_value,
+            metadata_index.generation(),
             query,
             self,
         );
