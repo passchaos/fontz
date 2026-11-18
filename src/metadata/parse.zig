@@ -27,7 +27,22 @@ pub const FaceMetadata = struct {
     italic: bool,
     style: types.Style,
     monospaced: bool,
+    /// Named instances declared by the `fvar` table. Empty for static fonts.
+    instances: []const InstanceMetadata = &.{},
     bytes_read: usize,
+};
+
+/// One `fvar` named instance. `index` is the zero-based instance record index;
+/// consumers that already store a 0-based instance identity can use it
+/// directly, while the font index exposes it as `named_instance = index + 1`
+/// so zero keeps meaning "the face's default instance".
+pub const InstanceMetadata = struct {
+    index: u16,
+    subfamily: []const u8,
+    postscript_name: []const u8,
+    weight: u16,
+    stretch: u16,
+    style: types.Style,
 };
 
 const max_collection_faces = 64;
@@ -118,6 +133,7 @@ pub fn readSfntMetadata(
     var name_record: ?TableRecord = null;
     var os2_record: ?TableRecord = null;
     var post_record: ?TableRecord = null;
+    var fvar_record: ?TableRecord = null;
     var index: usize = 0;
     while (index < num_tables) : (index += 1) {
         const record = directory[index * 16 ..][0..16];
@@ -129,6 +145,7 @@ pub fn readSfntMetadata(
         if (std.mem.eql(u8, tag, "name")) name_record = table;
         if (std.mem.eql(u8, tag, "OS/2")) os2_record = table;
         if (std.mem.eql(u8, tag, "post")) post_record = table;
+        if (std.mem.eql(u8, tag, "fvar")) fvar_record = table;
     }
     const name_table = name_record orelse return null;
     if (name_table.length < 6 or name_table.length > max_name_table_bytes) return null;
@@ -174,6 +191,27 @@ pub fn readSfntMetadata(
             }
         }
     }
+    var instances: []const InstanceMetadata = &.{};
+    if (fvar_record) |fvar| {
+        if (fvar.length >= 16 and fvar.length <= 1024 * 1024) {
+            const fvar_len = @as(usize, fvar.length);
+            if (fvar_len <= remaining_bytes -| bytes_read) {
+                const fvar_bytes = try scratch.alloc(u8, fvar_len);
+                if (try file.readPositionalAll(io, fvar_bytes, fvar.offset) == fvar_len) {
+                    bytes_read += fvar_len;
+                    instances = (try parseFvar(
+                        fvar_bytes,
+                        name_bytes,
+                        persist,
+                        names.postscript_name,
+                        weight,
+                        family_mod.widthClassToStretch(width_class),
+                        style,
+                    )) orelse &.{};
+                }
+            }
+        }
+    }
     return .{
         .family = names.family,
         .families = names.families,
@@ -186,8 +224,178 @@ pub fn readSfntMetadata(
         .italic = style != .normal,
         .style = style,
         .monospaced = monospaced,
+        .instances = instances,
         .bytes_read = bytes_read,
     };
+}
+
+const max_named_instances = 128;
+
+const FvarAxis = struct {
+    tag: [4]u8,
+    default: f32,
+};
+
+fn parseFvar(
+    bytes: []const u8,
+    name_bytes: []const u8,
+    persist: std.mem.Allocator,
+    base_postscript_name: []const u8,
+    base_weight: u16,
+    base_stretch: u16,
+    base_style: types.Style,
+) !?[]const InstanceMetadata {
+    if (bytes.len < 16) return null;
+    const axes_offset = std.mem.readInt(u16, bytes[4..6], .big);
+    const axis_count = std.mem.readInt(u16, bytes[8..10], .big);
+    const axis_size = std.mem.readInt(u16, bytes[10..12], .big);
+    const instance_count = std.mem.readInt(u16, bytes[12..14], .big);
+    const instance_size = std.mem.readInt(u16, bytes[14..16], .big);
+    if (axis_count == 0 or axis_count > 64) return null;
+    if (axis_size < 20 or instance_size < 4 + @as(usize, axis_count) * 4) return null;
+    const axes_start = @as(usize, axes_offset);
+    const axes_end = axes_start + @as(usize, axis_count) * axis_size;
+    if (axes_end > bytes.len) return null;
+    const instance_start = axes_end;
+    if (instance_start + @as(usize, instance_count) * instance_size > bytes.len) return null;
+
+    var axes: [64]FvarAxis = undefined;
+    for (0..axis_count) |axis_index| {
+        const axis = bytes[axes_start + axis_index * axis_size ..][0..axis_size];
+        axes[axis_index] = .{
+            .tag = axis[0..4].*,
+            .default = fixedToFloat(std.mem.readInt(i32, axis[4..8], .big)),
+        };
+    }
+
+    const limit = @min(@as(usize, instance_count), max_named_instances);
+    var instances: std.ArrayList(InstanceMetadata) = .empty;
+    errdefer instances.deinit(persist);
+    for (0..limit) |instance_index| {
+        const record = bytes[instance_start + instance_index * instance_size ..][0..instance_size];
+        const subfamily_id = std.mem.readInt(u16, record[0..2], .big);
+        if (subfamily_id < 256) continue;
+        const subfamily = (try resolveNameId(name_bytes, subfamily_id, persist)) orelse continue;
+        const postscript_id: u16 = if (instance_size >= 4 + @as(usize, axis_count) * 4 + 2)
+            std.mem.readInt(u16, record[4 + @as(usize, axis_count) * 4 ..][0..2], .big)
+        else
+            0;
+        var postscript_name: ?[]const u8 = if (postscript_id >= 256)
+            try resolveNameId(name_bytes, postscript_id, persist)
+        else
+            null;
+        if (postscript_name == null) {
+            postscript_name = try deriveInstancePostscriptName(
+                name_bytes,
+                persist,
+                base_postscript_name,
+                subfamily,
+            );
+        }
+
+        var weight = base_weight;
+        var stretch = base_stretch;
+        var style = base_style;
+        for (axes[0..axis_count], 0..) |axis, axis_index| {
+            const value = fixedToFloat(std.mem.readInt(
+                i32,
+                record[4 + axis_index * 4 ..][0..4],
+                .big,
+            ));
+            if (std.mem.eql(u8, &axis.tag, "wght")) {
+                weight = clampRound(value, 1, 1000);
+            } else if (std.mem.eql(u8, &axis.tag, "wdth")) {
+                stretch = clampRound(value, 50, 200);
+            } else if (std.mem.eql(u8, &axis.tag, "ital")) {
+                style = if (value >= 0.5) .italic else .normal;
+            } else if (std.mem.eql(u8, &axis.tag, "slnt")) {
+                if (@abs(value - axis.default) > 0.01) style = .oblique;
+            }
+        }
+
+        try instances.append(persist, .{
+            .index = @intCast(instance_index),
+            .subfamily = subfamily,
+            .postscript_name = postscript_name.?,
+            .weight = weight,
+            .stretch = stretch,
+            .style = style,
+        });
+    }
+    return try instances.toOwnedSlice(persist);
+}
+
+fn fixedToFloat(value: i32) f32 {
+    return @as(f32, @floatFromInt(value)) / 65536.0;
+}
+
+fn clampRound(value: f32, min: u16, max: u16) u16 {
+    const rounded: i64 = @intFromFloat(@round(value));
+    if (rounded < min) return min;
+    if (rounded > max) return max;
+    return @intCast(rounded);
+}
+
+fn deriveInstancePostscriptName(
+    name_bytes: []const u8,
+    allocator: std.mem.Allocator,
+    base_postscript_name: []const u8,
+    subfamily: []const u8,
+) ![]const u8 {
+    if (try resolveNameId(name_bytes, 25, allocator)) |prefix| {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, prefix);
+        for (subfamily) |byte| {
+            if (byte == ' ') continue;
+            try out.append(allocator, byte);
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (base_postscript_name.len != 0) {
+        try out.appendSlice(allocator, base_postscript_name);
+        try out.append(allocator, '-');
+    }
+    for (subfamily) |byte| {
+        if (byte == ' ') continue;
+        try out.append(allocator, byte);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Resolve one `name` table ID using the same platform/language scoring as
+/// `parseNameTable`. Returns an owned UTF-8 string.
+fn resolveNameId(
+    bytes: []const u8,
+    name_id: u16,
+    allocator: std.mem.Allocator,
+) !?[]const u8 {
+    if (bytes.len < 6) return null;
+    const count = std.mem.readInt(u16, bytes[2..4], .big);
+    const string_offset = std.mem.readInt(u16, bytes[4..6], .big);
+    if (bytes.len < 6 + @as(usize, count) * 12) return null;
+    var best: ?[]const u8 = null;
+    var best_score: u16 = 0;
+    var record_index: usize = 0;
+    while (record_index < count) : (record_index += 1) {
+        const record = bytes[6 + record_index * 12 ..][0..12];
+        if (std.mem.readInt(u16, record[6..8], .big) != name_id) continue;
+        const platform = std.mem.readInt(u16, record[0..2], .big);
+        const encoding = std.mem.readInt(u16, record[2..4], .big);
+        const language = std.mem.readInt(u16, record[4..6], .big);
+        const length = std.mem.readInt(u16, record[8..10], .big);
+        const offset = std.mem.readInt(u16, record[10..12], .big);
+        const start = @as(usize, string_offset) + offset;
+        if (start > bytes.len or length > bytes.len - start) continue;
+        const score = nameScore(platform, encoding, language);
+        if (score == 0 or score <= best_score) continue;
+        const decoded = (try decodeName(allocator, platform, bytes[start..][0..length])) orelse continue;
+        best = decoded;
+        best_score = score;
+    }
+    return best;
 }
 
 const TableRecord = struct {

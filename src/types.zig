@@ -53,6 +53,10 @@ pub const Candidate = struct {
     /// metadata; callers may also use the PostScript name as a stable identity.
     face_index: ?u32 = null,
     provider_index: u32 = 0,
+    /// Zero for the face's default instance; otherwise `N` selects the
+    /// zero-based `fvar` named instance `N - 1`. Consumers that can instantiate
+    /// variable fonts should apply that instance's coordinates after loading
+    /// `path`/`face_index`.
     named_instance: u16 = 0,
     provider: Provider,
     /// Face attributes when the provider exposes them. These are advisory for

@@ -13,8 +13,13 @@ glyphs. Those remain in Cangjie and Iris.
 libc.
 
 - `metadata_index`: bounded scan of platform font roots. Reads sfnt headers plus
-  `name`/`OS/2`/`post` tables and keeps localized family names, PostScript/full
-  names, weight, CSS stretch, style and monospaced metadata.
+  `name`/`OS/2`/`post`/`fvar` tables and keeps localized family names,
+  PostScript/full names, weight, CSS stretch, style and monospaced metadata.
+  Variable fonts contribute one matchable entry per `fvar` named instance;
+  `Candidate.named_instance` is `0` for the default instance and `N` for the
+  zero-based instance `N - 1`. Dot-prefixed families are treated as hidden
+  CoreText-style aliases: addressable by PostScript name, excluded from family
+  matching and family listings.
 - `metadata/fontconfig`: pure-Zig reader for fontconfig XML configuration
   (`<dir>`, `<include>`, `<alias>`), including XDG and `~` prefixes. Used on
   Linux to discover configured font directories and generic-family aliases.
@@ -124,4 +129,6 @@ semantics, coverage checks, and ecosystem boundaries.
 ```sh
 zig build test    # pure Zig, no libc or native font libraries
 zig build check   # cross-compile the pure provider for Windows and macOS
+```
+ cross-compile the pure provider for Windows and macOS
 ```

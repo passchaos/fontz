@@ -17,6 +17,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run fontz tests");
     test_step.dependOn(&run_tests.step);
 
+    if (target.result.os.tag == .macos) {
+        const coretext_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/coretext_matching_test.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fontz", .module = mod }},
+            }),
+        });
+        coretext_tests.root_module.linkFramework("CoreFoundation", .{});
+        coretext_tests.root_module.linkFramework("CoreText", .{});
+        const run_coretext_tests = b.addRunArtifact(coretext_tests);
+        test_step.dependOn(&run_coretext_tests.step);
+        const coretext_step = b.step(
+            "test-macos-coretext",
+            "Run the macOS Core Text font-matching differential",
+        );
+        coretext_step.dependOn(&run_coretext_tests.step);
+    }
+
     const check_step = b.step("check", "Compile platform providers for Windows and macOS");
 
     const windows_target = b.resolveTargetQuery(.{

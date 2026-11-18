@@ -175,7 +175,7 @@ pub const Discovery = struct {
                 selected.postscript_name,
                 selected.face_index,
                 selected.face_index,
-                0,
+                selected.named_instance,
                 .metadata_index,
             );
             candidate.setMetadata(

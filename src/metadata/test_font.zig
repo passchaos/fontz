@@ -2,6 +2,13 @@
 
 const std = @import("std");
 
+pub const TestInstance = struct {
+    subfamily: []const u8,
+    postscript_name: []const u8,
+    /// Design-coordinate value on the synthetic `wght` axis.
+    weight: f32,
+};
+
 pub const TestFontOptions = struct {
     family: []const u8,
     localized_family: ?struct { name: []const u8, language: u16 = 0x0804 } = null,
@@ -12,15 +19,21 @@ pub const TestFontOptions = struct {
     width_class: u16 = 5,
     italic: bool = false,
     monospaced: bool = false,
+    instances: []const TestInstance = &.{},
 };
 
 pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
-    const record_count: usize = 4 + @as(usize, @intFromBool(options.localized_family != null));
+    const record_count: usize = 4 +
+        @as(usize, @intFromBool(options.localized_family != null)) +
+        options.instances.len * 2;
     const strings_offset = 6 + record_count * 12;
     const full_name = options.full_name orelse options.family;
     var string_len: usize = (options.family.len + options.subfamily.len +
         full_name.len + options.postscript_name.len) * 2;
     if (options.localized_family) |localized| string_len += localized.name.len * 2;
+    for (options.instances) |instance| {
+        string_len += (instance.subfamily.len + instance.postscript_name.len) * 2;
+    }
     const total = strings_offset + string_len;
     const bytes = try allocator.alloc(u8, total);
     @memset(bytes, 0);
@@ -39,28 +52,88 @@ pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions
     record_index += 1;
     offset = writeTestNameRecord(bytes, record_index, 3, 1, 0x0409, 4, strings_offset, offset, full_name);
     record_index += 1;
-    _ = writeTestNameRecord(bytes, record_index, 3, 1, 0x0409, 6, strings_offset, offset, options.postscript_name);
+    offset = writeTestNameRecord(bytes, record_index, 3, 1, 0x0409, 6, strings_offset, offset, options.postscript_name);
+    record_index += 1;
+    for (options.instances, 0..) |instance, instance_index| {
+        const subfamily_id: u16 = @intCast(256 + instance_index * 2);
+        const postscript_id: u16 = subfamily_id + 1;
+        offset = writeTestNameRecord(bytes, record_index, 3, 1, 0x0409, subfamily_id, strings_offset, offset, instance.subfamily);
+        record_index += 1;
+        offset = writeTestNameRecord(bytes, record_index, 3, 1, 0x0409, postscript_id, strings_offset, offset, instance.postscript_name);
+        record_index += 1;
+    }
     return bytes;
+}
+
+fn buildTestFvarTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
+    const axis_count: usize = 1;
+    const axis_size: usize = 20;
+    const instance_size: usize = 4 + axis_count * 4 + 2;
+    const header_len: usize = 16;
+    const total = header_len + axis_size + options.instances.len * instance_size;
+    const bytes = try allocator.alloc(u8, total);
+    @memset(bytes, 0);
+    std.mem.writeInt(u16, bytes[0..2], 1, .big);
+    std.mem.writeInt(u16, bytes[2..4], 0, .big);
+    std.mem.writeInt(u16, bytes[4..6], @intCast(header_len), .big);
+    std.mem.writeInt(u16, bytes[8..10], @intCast(axis_count), .big);
+    std.mem.writeInt(u16, bytes[10..12], @intCast(axis_size), .big);
+    std.mem.writeInt(u16, bytes[12..14], @intCast(options.instances.len), .big);
+    std.mem.writeInt(u16, bytes[14..16], @intCast(instance_size), .big);
+    const axis = bytes[header_len..][0..axis_size];
+    @memcpy(axis[0..4], "wght");
+    writeFixed(axis[4..8], 100);
+    writeFixed(axis[8..12], 400);
+    writeFixed(axis[12..16], 900);
+    std.mem.writeInt(u16, axis[16..18], 0, .big);
+    std.mem.writeInt(u16, axis[18..20], 257, .big);
+    var instance_offset = header_len + axis_size;
+    for (options.instances, 0..) |instance, instance_index| {
+        const record = bytes[instance_offset..][0..instance_size];
+        const subfamily_id: u16 = @intCast(256 + instance_index * 2);
+        std.mem.writeInt(u16, record[0..2], subfamily_id, .big);
+        std.mem.writeInt(u16, record[2..4], 0, .big);
+        writeFixed(record[4..8], instance.weight);
+        std.mem.writeInt(u16, record[8..10], subfamily_id + 1, .big);
+        instance_offset += instance_size;
+    }
+    return bytes;
+}
+
+fn writeFixed(out: []u8, value: f32) void {
+    const fixed: i32 = @intFromFloat(@round(value * 65536.0));
+    std.mem.writeInt(i32, out[0..4], fixed, .big);
 }
 
 pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
     const name_table = try buildTestNameTable(allocator, options);
     defer allocator.free(name_table);
+    const fvar_table = if (options.instances.len != 0)
+        try buildTestFvarTable(allocator, options)
+    else
+        null;
+    defer if (fvar_table) |table| allocator.free(table);
     const os2_len = 96;
     const post_len = 32;
-    const dir_len = 3 * 16;
+    const table_count: u16 = if (fvar_table != null) 4 else 3;
+    const dir_len = @as(usize, table_count) * 16;
     const name_offset = 12 + dir_len;
     const os2_offset = align4(name_offset + name_table.len);
     const post_offset = align4(os2_offset + os2_len);
-    const total = align4(post_offset + post_len);
+    const fvar_offset = align4(post_offset + post_len);
+    const total = align4(fvar_offset + (if (fvar_table) |table| table.len else 0));
     const bytes = try allocator.alloc(u8, total);
     @memset(bytes, 0);
     std.mem.writeInt(u32, bytes[0..4], 0x00010000, .big);
-    std.mem.writeInt(u16, bytes[4..6], 3, .big);
+    std.mem.writeInt(u16, bytes[4..6], table_count, .big);
     std.mem.writeInt(u16, bytes[6..8], 16, .big);
     writeTestTableRecord(bytes, 0, "name", name_offset, name_table.len);
     writeTestTableRecord(bytes, 1, "OS/2", os2_offset, os2_len);
     writeTestTableRecord(bytes, 2, "post", post_offset, post_len);
+    if (fvar_table) |table| {
+        writeTestTableRecord(bytes, 3, "fvar", fvar_offset, table.len);
+        @memcpy(bytes[fvar_offset..][0..table.len], table);
+    }
     @memcpy(bytes[name_offset..][0..name_table.len], name_table);
     const os2 = bytes[os2_offset..][0..os2_len];
     std.mem.writeInt(u16, os2[0..2], 4, .big);

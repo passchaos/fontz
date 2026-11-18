@@ -26,6 +26,9 @@ pub const Face = struct {
     path: []const u8,
     /// Zero-based face inside a TrueType/OpenType collection, otherwise 0.
     face_index: u32 = 0,
+    /// Zero for the face's default instance; otherwise `N` selects the
+    /// zero-based `fvar` named instance `N - 1`.
+    named_instance: u16 = 0,
     /// Preferred English/typographic family name.
     family: []const u8,
     /// Every localized family name found in the `name` table. `family` is
@@ -253,6 +256,10 @@ fn findConcrete(index: *const Index, family: []const u8, query: types.Query) ?*c
         }
     }
     return selectBestFace(index.faces, indices.items, query);
+}
+
+fn isHiddenFamilyName(name: []const u8) bool {
+    return name.len != 0 and name[0] == '.';
 }
 
 fn faceMatchesFamily(face: *const Face, family: []const u8) bool {
@@ -491,6 +498,25 @@ fn buildIndex(io: std.Io, options: Options) !Index {
                     .style = meta.style,
                     .monospaced = meta.monospaced,
                 });
+                for (meta.instances) |instance| {
+                    if (faces.items.len >= options.max_faces) break;
+                    try faces.append(allocator, .{
+                        .path = path,
+                        .face_index = @intCast(face_index),
+                        .named_instance = @intCast(@as(usize, instance.index) + 1),
+                        .family = meta.family,
+                        .families = meta.families,
+                        .subfamily = instance.subfamily,
+                        .full_name = meta.full_name,
+                        .postscript_name = instance.postscript_name,
+                        .weight = instance.weight,
+                        .stretch = instance.stretch,
+                        .width_class = meta.width_class,
+                        .italic = instance.style != .normal,
+                        .style = instance.style,
+                        .monospaced = meta.monospaced,
+                    });
+                }
             }
         }
     }
@@ -501,12 +527,18 @@ fn buildIndex(io: std.Io, options: Options) !Index {
     var family_name_set: std.StringHashMapUnmanaged(void) = .empty;
     for (owned_faces, 0..) |face, face_index| {
         for (face.families) |localized| {
+            // Dot-prefixed families are CoreText-style hidden aliases. They
+            // remain addressable by PostScript name but must not participate
+            // in ordinary family matching or family listing.
+            if (isHiddenFamilyName(localized.name)) continue;
             const key = try normalizeFamilyKey(allocator, localized.name);
             const gop = try family_index.getOrPut(allocator, key);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, @intCast(face_index));
         }
-        try family_name_set.put(allocator, face.family, {});
+        if (!isHiddenFamilyName(face.family)) {
+            try family_name_set.put(allocator, face.family, {});
+        }
         if (face.postscript_name.len != 0) {
             const key = try normalizePostScriptKey(allocator, face.postscript_name);
             const gop = try postscript_index.getOrPut(allocator, key);
@@ -585,6 +617,11 @@ fn platformRoots() []const []const u8 {
             "/System/Library/Fonts",
             "/System/Library/Fonts/Supplemental",
             "/Library/Fonts",
+            // System-reserved faces that CoreText exposes as regular families.
+            // PingFang lives here on current macOS releases, so skipping this
+            // root makes `PingFang SC` unresolvable even though the family is
+            // visible to native text stacks.
+            "/System/Library/PrivateFrameworks/FontServices.framework/Versions/Current/Resources/Reserved",
         },
         .windows => &.{},
         else => &.{},
@@ -707,6 +744,44 @@ test "index resolves a family from configured roots" {
     try std.testing.expectEqual(@as(u16, 700), face.weight);
     try std.testing.expect(face.italic);
     try std.testing.expectEqualStrings("TestSans-BoldItalic", face.postscript_name);
+}
+
+test "index matches fvar named instances by weight" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Variable Sans",
+        .postscript_name = "VariableSans-Regular",
+        .instances = &.{
+            .{ .subfamily = "Light", .postscript_name = "VariableSans-Light", .weight = 300 },
+            .{ .subfamily = "Bold", .postscript_name = "VariableSans-Bold", .weight = 700 },
+        },
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "VariableSans.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+
+    const regular = findFamily(io, "Variable Sans", 400, false, 5, .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("VariableSans-Regular", regular.postscript_name);
+    try std.testing.expectEqual(@as(u16, 0), regular.named_instance);
+
+    const light = findFamily(io, "Variable Sans", 300, false, 5, .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("VariableSans-Light", light.postscript_name);
+    try std.testing.expectEqual(@as(u16, 1), light.named_instance);
+    try std.testing.expectEqual(@as(u16, 300), light.weight);
+
+    const bold = findFamily(io, "Variable Sans", 700, false, 5, .{ .roots = &roots }) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("VariableSans-Bold", bold.postscript_name);
+    try std.testing.expectEqual(@as(u16, 2), bold.named_instance);
+    try std.testing.expectEqual(@as(u16, 700), bold.weight);
 }
 
 test "CSS matching prefers style over weight distance" {
