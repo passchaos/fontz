@@ -88,8 +88,9 @@ pub fn forQuery(query: types.Query) []const CandidatePath {
             return forRoleCandidates(role, language, query.weight, query.style);
         }
         if (scriptForCodepoint(codepoint)) |script| return scriptCandidates(script);
-        // Unknown/unassigned script: do not substitute an unrelated UI font.
-        return &.{};
+        // Unknown/unassigned script: fall back to the platform's explicit
+        // placeholder font instead of an unrelated UI font.
+        return &last_resort_candidates;
     }
     if (query.family.len == 0 and !saw_concrete) {
         return forRoleCandidates(.ui, query.language, query.weight, query.style);
@@ -148,6 +149,25 @@ const Script = enum {
     georgian,
     armenian,
     ethiopic,
+    syriac,
+    thaana,
+    oriya,
+    tibetan,
+    mongolian,
+    cherokee,
+    canadian_aboriginal,
+    tifinagh,
+    ol_chiki,
+    javanese,
+    sundanese,
+    balinese,
+    batak,
+    lepcha,
+    vai,
+    bamum,
+    adlam,
+    meetei_mayek,
+    yi,
 };
 
 fn scriptForCodepoint(codepoint: u21) ?Script {
@@ -170,6 +190,25 @@ fn scriptForCodepoint(codepoint: u21) ?Script {
         0x1200...0x137f => .ethiopic,
         0x1780...0x17ff => .khmer,
         0x0530...0x058f => .armenian,
+        0x0700...0x074f => .syriac,
+        0x0780...0x07bf => .thaana,
+        0x0b00...0x0b7f => .oriya,
+        0x0f00...0x0fff => .tibetan,
+        0x1800...0x18af => .mongolian,
+        0x13a0...0x13ff, 0xab70...0xabbf => .cherokee,
+        0x1400...0x167f, 0x18b0...0x18ff => .canadian_aboriginal,
+        0x2d30...0x2d7f => .tifinagh,
+        0x1c50...0x1c7f => .ol_chiki,
+        0xa980...0xa9df => .javanese,
+        0x1b80...0x1bbf => .sundanese,
+        0x1b00...0x1b7f => .balinese,
+        0x1bc0...0x1bff => .batak,
+        0x1c00...0x1c4f => .lepcha,
+        0xa500...0xa63f => .vai,
+        0xa6a0...0xa6ff, 0x16800...0x16a3f => .bamum,
+        0x1e900...0x1e95f => .adlam,
+        0xabc0...0xabff, 0xaae0...0xaaff => .meetei_mayek,
+        0xa000...0xa48f => .yi,
         else => null,
     };
 }
@@ -194,6 +233,25 @@ fn scriptCandidates(script: Script) []const CandidatePath {
         .georgian => &georgian_candidates,
         .armenian => &armenian_candidates,
         .ethiopic => &ethiopic_candidates,
+        .syriac => &syriac_candidates,
+        .thaana => &thaana_candidates,
+        .oriya => &oriya_candidates,
+        .tibetan => &tibetan_candidates,
+        .mongolian => &mongolian_candidates,
+        .cherokee => &cherokee_candidates,
+        .canadian_aboriginal => &canadian_aboriginal_candidates,
+        .tifinagh => &tifinagh_candidates,
+        .ol_chiki => &ol_chiki_candidates,
+        .javanese => &javanese_candidates,
+        .sundanese => &sundanese_candidates,
+        .balinese => &balinese_candidates,
+        .batak => &batak_candidates,
+        .lepcha => &lepcha_candidates,
+        .vai => &vai_candidates,
+        .bamum => &bamum_candidates,
+        .adlam => &adlam_candidates,
+        .meetei_mayek => &meetei_mayek_candidates,
+        .yi => &yi_candidates,
     };
 }
 
@@ -727,6 +785,128 @@ const ethiopic_candidates = [_]CandidatePath{
     .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
 };
 
+const syriac_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansSyriac-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansSyriac-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Estrangelo Edessa.ttf" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+};
+
+const thaana_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansThaana-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansThaana-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\mvboli.ttf" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+};
+
+const oriya_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/NotoSansOriya.ttc" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansOriya-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Nirmala.ttf" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+};
+
+const tibetan_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Kailasa.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Kokonor.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSerifTibetan-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Microsoft Himalaya.ttf" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+};
+
+const mongolian_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansMongolian-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Mongolian Baiti.ttf" },
+};
+
+const cherokee_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/PlantagenetCherokee.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCherokee-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Gadugi.ttf" },
+};
+
+const canadian_aboriginal_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/EuphemiaCAS.ttc" },
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansCanadianAboriginal-Regular.otf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansCanadianAboriginal-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Gadugi.ttf" },
+};
+
+const tifinagh_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansTifinagh-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Ebrima.ttf" },
+};
+
+const ol_chiki_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansOlChiki-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansOlChiki-Regular.ttf" },
+    .{ .path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+};
+
+const javanese_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansJavanese-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Javanese Text.ttf" },
+};
+
+const sundanese_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansSundanese-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Sundanese Text.ttf" },
+};
+
+const balinese_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansBalinese-Regular.ttf" },
+};
+
+const batak_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansBatak-Regular.ttf" },
+};
+
+const lepcha_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansLepcha-Regular.ttf" },
+};
+
+const vai_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansVai-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansVai-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Ebrima.ttf" },
+};
+
+const bamum_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansBamum-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansBamum-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Ebrima.ttf" },
+};
+
+const adlam_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansAdlam-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansAdlam-Regular.ttf" },
+};
+
+const meetei_mayek_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansMeeteiMayek-Regular.ttf" },
+};
+
+const yi_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/Supplemental/NotoSansYi-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansYi-Regular.ttf" },
+    .{ .path = "C:\\Windows\\Fonts\\Microsoft Yi Baiti.ttf" },
+};
+
+const last_resort_candidates = [_]CandidatePath{
+    .{ .path = "/System/Library/Fonts/LastResort.otf" },
+    .{ .path = "C:\\Windows\\Fonts\\seguisym.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" },
+};
+
 test "role candidates keep CJK language face indexes" {
     const ja = forRoleCandidates(.cjk, "ja-JP", 400, .normal);
     try std.testing.expectEqual(@as(u32, 0), ja[0].face_index);
@@ -753,7 +933,11 @@ test "query fallback handles generics and leaves unknown concrete families alone
     const unknown = forQuery(.{ .family = "Definitely Missing Family" });
     try std.testing.expectEqual(@as(usize, 0), unknown.len);
     const uncovered = forQuery(.{ .family = "", .required_codepoint = 0x10ffff });
-    try std.testing.expectEqual(@as(usize, 0), uncovered.len);
+    try std.testing.expect(uncovered.len != 0);
+    try std.testing.expectEqualStrings(
+        "/System/Library/Fonts/LastResort.otf",
+        uncovered[0].path,
+    );
     const generic_cjk = forQuery(.{
         .family = "sans-serif",
         .required_codepoint = 0x4e2d,
@@ -775,3 +959,47 @@ test "codepoint fallback selects CJK and emoji roles" {
 }
 
 const std = @import("std");
+
+test "remaining scripts resolve to dedicated fallbacks" {
+    const cases = [_]struct { codepoint: u21, path: []const u8 }{
+        .{ .codepoint = 0x0710, .path = "/System/Library/Fonts/Supplemental/NotoSansSyriac-Regular.ttf" },
+        .{ .codepoint = 0x0780, .path = "/System/Library/Fonts/Supplemental/NotoSansThaana-Regular.ttf" },
+        .{ .codepoint = 0x0b15, .path = "/System/Library/Fonts/NotoSansOriya.ttc" },
+        .{ .codepoint = 0x0f40, .path = "/System/Library/Fonts/Kailasa.ttc" },
+        .{ .codepoint = 0x1820, .path = "/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf" },
+        .{ .codepoint = 0x13a0, .path = "/System/Library/Fonts/Supplemental/PlantagenetCherokee.ttf" },
+        .{ .codepoint = 0x1401, .path = "/System/Library/Fonts/Supplemental/EuphemiaCAS.ttc" },
+        .{ .codepoint = 0x2d30, .path = "/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf" },
+        .{ .codepoint = 0x1c50, .path = "/System/Library/Fonts/Supplemental/NotoSansOlChiki-Regular.ttf" },
+        .{ .codepoint = 0xa980, .path = "/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf" },
+        .{ .codepoint = 0x1b80, .path = "/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf" },
+        .{ .codepoint = 0x1b00, .path = "/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf" },
+        .{ .codepoint = 0x1bc0, .path = "/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf" },
+        .{ .codepoint = 0x1c00, .path = "/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf" },
+        .{ .codepoint = 0xa500, .path = "/System/Library/Fonts/Supplemental/NotoSansVai-Regular.ttf" },
+        .{ .codepoint = 0xa6a0, .path = "/System/Library/Fonts/Supplemental/NotoSansBamum-Regular.ttf" },
+        .{ .codepoint = 0x1e900, .path = "/System/Library/Fonts/Supplemental/NotoSansAdlam-Regular.ttf" },
+        .{ .codepoint = 0xabc0, .path = "/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf" },
+        .{ .codepoint = 0xa000, .path = "/System/Library/Fonts/Supplemental/NotoSansYi-Regular.ttf" },
+    };
+    for (cases) |case| {
+        const candidates = forQuery(.{
+            .family = "",
+            .required_codepoint = case.codepoint,
+        });
+        try std.testing.expect(candidates.len > 0);
+        try std.testing.expectEqualStrings(case.path, candidates[0].path);
+    }
+}
+
+test "unknown codepoints use the platform last-resort font" {
+    const candidates = forQuery(.{
+        .family = "",
+        .required_codepoint = 0x10fff0,
+    });
+    try std.testing.expect(candidates.len > 0);
+    try std.testing.expectEqualStrings(
+        "/System/Library/Fonts/LastResort.otf",
+        candidates[0].path,
+    );
+}

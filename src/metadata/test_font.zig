@@ -9,6 +9,12 @@ pub const TestInstance = struct {
     weight: f32,
 };
 
+pub const TestAxis = struct {
+    min: f32,
+    default: f32,
+    max: f32,
+};
+
 pub const TestFontOptions = struct {
     family: []const u8,
     localized_family: ?struct { name: []const u8, language: u16 = 0x0804 } = null,
@@ -20,6 +26,8 @@ pub const TestFontOptions = struct {
     italic: bool = false,
     monospaced: bool = false,
     instances: []const TestInstance = &.{},
+    /// Optional synthetic `opsz` axis range.
+    opsz: ?TestAxis = null,
 };
 
 pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
@@ -66,11 +74,11 @@ pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions
 }
 
 fn buildTestFvarTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
-    const axis_count: usize = 1;
+    const axis_count: usize = 1 + @as(usize, @intFromBool(options.opsz != null));
     const axis_size: usize = 20;
     const instance_size: usize = 4 + axis_count * 4 + 2;
     const header_len: usize = 16;
-    const total = header_len + axis_size + options.instances.len * instance_size;
+    const total = header_len + axis_size * axis_count + options.instances.len * instance_size;
     const bytes = try allocator.alloc(u8, total);
     @memset(bytes, 0);
     std.mem.writeInt(u16, bytes[0..2], 1, .big);
@@ -87,14 +95,25 @@ fn buildTestFvarTable(allocator: std.mem.Allocator, options: TestFontOptions) ![
     writeFixed(axis[12..16], 900);
     std.mem.writeInt(u16, axis[16..18], 0, .big);
     std.mem.writeInt(u16, axis[18..20], 257, .big);
-    var instance_offset = header_len + axis_size;
+    if (options.opsz) |opsz| {
+        const opsz_axis = bytes[header_len + axis_size ..][0..axis_size];
+        @memcpy(opsz_axis[0..4], "opsz");
+        writeFixed(opsz_axis[4..8], opsz.min);
+        writeFixed(opsz_axis[8..12], opsz.default);
+        writeFixed(opsz_axis[12..16], opsz.max);
+        std.mem.writeInt(u16, opsz_axis[16..18], 0, .big);
+        std.mem.writeInt(u16, opsz_axis[18..20], 258, .big);
+    }
+    var instance_offset = header_len + axis_size * axis_count;
     for (options.instances, 0..) |instance, instance_index| {
         const record = bytes[instance_offset..][0..instance_size];
         const subfamily_id: u16 = @intCast(256 + instance_index * 2);
         std.mem.writeInt(u16, record[0..2], subfamily_id, .big);
         std.mem.writeInt(u16, record[2..4], 0, .big);
         writeFixed(record[4..8], instance.weight);
-        std.mem.writeInt(u16, record[8..10], subfamily_id + 1, .big);
+        if (options.opsz) |opsz| writeFixed(record[8..12], opsz.default);
+        const postscript_offset = 4 + axis_count * 4;
+        std.mem.writeInt(u16, record[postscript_offset..][0..2], subfamily_id + 1, .big);
         instance_offset += instance_size;
     }
     return bytes;
@@ -108,7 +127,7 @@ fn writeFixed(out: []u8, value: f32) void {
 pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
     const name_table = try buildTestNameTable(allocator, options);
     defer allocator.free(name_table);
-    const fvar_table = if (options.instances.len != 0)
+    const fvar_table = if (options.instances.len != 0 or options.opsz != null)
         try buildTestFvarTable(allocator, options)
     else
         null;

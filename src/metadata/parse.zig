@@ -29,6 +29,10 @@ pub const FaceMetadata = struct {
     monospaced: bool,
     /// Named instances declared by the `fvar` table. Empty for static fonts.
     instances: []const InstanceMetadata = &.{},
+    /// `opsz` axis range in design units, when the font declares one.
+    opsz_min: ?f32 = null,
+    opsz_default: ?f32 = null,
+    opsz_max: ?f32 = null,
     bytes_read: usize,
 };
 
@@ -191,7 +195,7 @@ pub fn readSfntMetadata(
             }
         }
     }
-    var instances: []const InstanceMetadata = &.{};
+    var fvar_metadata = FvarMetadata{};
     if (fvar_record) |fvar| {
         if (fvar.length >= 16 and fvar.length <= 1024 * 1024) {
             const fvar_len = @as(usize, fvar.length);
@@ -199,7 +203,7 @@ pub fn readSfntMetadata(
                 const fvar_bytes = try scratch.alloc(u8, fvar_len);
                 if (try file.readPositionalAll(io, fvar_bytes, fvar.offset) == fvar_len) {
                     bytes_read += fvar_len;
-                    instances = (try parseFvar(
+                    fvar_metadata = (try parseFvar(
                         fvar_bytes,
                         name_bytes,
                         persist,
@@ -207,7 +211,7 @@ pub fn readSfntMetadata(
                         weight,
                         family_mod.widthClassToStretch(width_class),
                         style,
-                    )) orelse &.{};
+                    )) orelse .{};
                 }
             }
         }
@@ -224,7 +228,10 @@ pub fn readSfntMetadata(
         .italic = style != .normal,
         .style = style,
         .monospaced = monospaced,
-        .instances = instances,
+        .instances = fvar_metadata.instances,
+        .opsz_min = fvar_metadata.opsz_min,
+        .opsz_default = fvar_metadata.opsz_default,
+        .opsz_max = fvar_metadata.opsz_max,
         .bytes_read = bytes_read,
     };
 }
@@ -239,6 +246,13 @@ const FvarAxis = struct {
     default: f32,
 };
 
+const FvarMetadata = struct {
+    instances: []const InstanceMetadata = &.{},
+    opsz_min: ?f32 = null,
+    opsz_default: ?f32 = null,
+    opsz_max: ?f32 = null,
+};
+
 fn parseFvar(
     bytes: []const u8,
     name_bytes: []const u8,
@@ -247,7 +261,7 @@ fn parseFvar(
     base_weight: u16,
     base_stretch: u16,
     base_style: types.Style,
-) !?[]const InstanceMetadata {
+) !?FvarMetadata {
     if (bytes.len < 16) return null;
     const axes_offset = std.mem.readInt(u16, bytes[4..6], .big);
     const axis_count = std.mem.readInt(u16, bytes[8..10], .big);
@@ -267,8 +281,20 @@ fn parseFvar(
         const axis = bytes[axes_start + axis_index * axis_size ..][0..axis_size];
         axes[axis_index] = .{
             .tag = axis[0..4].*,
-            .default = fixedToFloat(std.mem.readInt(i32, axis[4..8], .big)),
+            .default = fixedToFloat(std.mem.readInt(i32, axis[8..12], .big)),
         };
+    }
+
+    var result = FvarMetadata{};
+    // The axis record layout is tag, min, default, max.
+    var axis_cursor: usize = 0;
+    while (axis_cursor < axis_count) : (axis_cursor += 1) {
+        const axis = bytes[axes_start + axis_cursor * axis_size ..][0..axis_size];
+        if (!std.mem.eql(u8, axis[0..4], "opsz")) continue;
+        result.opsz_min = fixedToFloat(std.mem.readInt(i32, axis[4..8], .big));
+        result.opsz_default = fixedToFloat(std.mem.readInt(i32, axis[8..12], .big));
+        result.opsz_max = fixedToFloat(std.mem.readInt(i32, axis[12..16], .big));
+        break;
     }
 
     const limit = @min(@as(usize, instance_count), max_named_instances);
@@ -325,7 +351,8 @@ fn parseFvar(
             .style = style,
         });
     }
-    return try instances.toOwnedSlice(persist);
+    result.instances = try instances.toOwnedSlice(persist);
+    return result;
 }
 
 fn fixedToFloat(value: i32) f32 {

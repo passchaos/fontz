@@ -41,6 +41,9 @@ pub const Query = struct {
     style: Style = .normal,
     language: ?[]const u8 = null,
     required_codepoint: ?u21 = null,
+    /// Desired optical size in design units. The metadata index prefers a
+    /// face whose `opsz` axis range contains this value.
+    opsz: ?f32 = null,
     max_candidates: usize = 8,
 };
 

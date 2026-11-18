@@ -46,6 +46,10 @@ pub const Face = struct {
     italic: bool = false,
     style: types.Style = .normal,
     monospaced: bool = false,
+    /// `opsz` axis range in design units, when the face declares one.
+    opsz_min: ?f32 = null,
+    opsz_default: ?f32 = null,
+    opsz_max: ?f32 = null,
 };
 
 pub const GenericMapping = struct {
@@ -303,14 +307,34 @@ fn selectBestFace(
     const stretch = matchingStretch(faces, indices, query.stretch) orelse return null;
     const style = matchingStyle(faces, indices, stretch, query.style) orelse return null;
     const weight = matchingWeight(faces, indices, stretch, style, query.weight) orelse return null;
+    var best: ?*const Face = null;
+    var best_score: f32 = std.math.inf(f32);
     for (indices) |index| {
         if (index >= faces.len) continue;
         const face = &faces[index];
-        if (face.stretch == stretch and face.style == style and face.weight == weight) {
+        if (face.stretch != stretch or face.style != style or face.weight != weight) continue;
+        if (query.opsz) |requested| {
+            const score = opszScore(face, requested);
+            if (score < best_score) {
+                best = face;
+                best_score = score;
+            }
+        } else {
             return face;
         }
     }
-    return null;
+    return best;
+}
+
+/// Lower is better: a containing range wins, then the nearest range, and
+/// faces without `opsz` metadata rank last.
+fn opszScore(face: *const Face, requested: f32) f32 {
+    const min = face.opsz_min orelse return std.math.inf(f32);
+    const max = face.opsz_max orelse min;
+    if (requested < min) return min - requested;
+    if (requested > max) return requested - max;
+    const default = face.opsz_default orelse min;
+    return @abs(requested - default) * 1e-6;
 }
 
 fn matchingStretch(faces: []const Face, indices: []const u32, requested: u16) ?u16 {
@@ -522,6 +546,9 @@ fn buildIndex(io: std.Io, options: Options) !Index {
                 .italic = meta.italic,
                 .style = meta.style,
                 .monospaced = meta.monospaced,
+                .opsz_min = meta.opsz_min,
+                .opsz_default = meta.opsz_default,
+                .opsz_max = meta.opsz_max,
             });
             for (meta.instances) |instance| {
                 if (faces.items.len >= options.max_faces) break;
@@ -540,6 +567,9 @@ fn buildIndex(io: std.Io, options: Options) !Index {
                     .italic = instance.style != .normal,
                     .style = instance.style,
                     .monospaced = meta.monospaced,
+                    .opsz_min = meta.opsz_min,
+                    .opsz_default = meta.opsz_default,
+                    .opsz_max = meta.opsz_max,
                 });
             }
         }
@@ -1136,4 +1166,81 @@ test "TT collection face indexes follow PostScript names" {
     try std.testing.expectEqual(@as(u16, 700), face.weight);
     const index = try findFaceIndexByPostScript(io, face.path, "CollectionSans-Bold");
     try std.testing.expectEqual(@as(?u32, 1), index);
+}
+
+test "face selection prefers the optical-size range containing the query" {
+    const faces = [_]Face{
+        .{
+            .path = "text.ttf",
+            .family = "Opsz Sans",
+            .subfamily = "Regular",
+            .opsz_min = 8,
+            .opsz_default = 10,
+            .opsz_max = 12,
+        },
+        .{
+            .path = "display.ttf",
+            .family = "Opsz Sans",
+            .subfamily = "Regular",
+            .opsz_min = 48,
+            .opsz_default = 64,
+            .opsz_max = 96,
+        },
+    };
+    const indices = [_]u32{ 0, 1 };
+    const text = selectBestFace(&faces, &indices, .{
+        .family = "Opsz Sans",
+        .opsz = 11,
+    }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("text.ttf", text.path);
+    const display = selectBestFace(&faces, &indices, .{
+        .family = "Opsz Sans",
+        .opsz = 70,
+    }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("display.ttf", display.path);
+    const no_preference = selectBestFace(&faces, &indices, .{
+        .family = "Opsz Sans",
+    }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("text.ttf", no_preference.path);
+}
+
+test "index selects faces by opsz axis range" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const text_font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Optical Sans",
+        .subfamily = "Text",
+        .postscript_name = "OpticalSans-Text",
+        .opsz = .{ .min = 8, .default = 10, .max = 12 },
+    });
+    defer std.testing.allocator.free(text_font);
+    const display_font = try test_font.buildTestFont(std.testing.allocator, .{
+        .family = "Optical Sans",
+        .subfamily = "Display",
+        .postscript_name = "OpticalSans-Display",
+        .opsz = .{ .min = 48, .default = 64, .max = 96 },
+    });
+    defer std.testing.allocator.free(display_font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "OpticalSans-Text.ttf", .data = text_font });
+    try tmp.dir.writeFile(io, .{ .sub_path = "OpticalSans-Display.ttf", .data = display_font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    resetForTesting(io);
+    defer resetForTesting(io);
+
+    const text = findFace(io, .{
+        .family = "Optical Sans",
+        .opsz = 11,
+    }, .{ .roots = &roots }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("OpticalSans-Text", text.postscript_name);
+    try std.testing.expectEqual(@as(?f32, 10), text.opsz_default);
+
+    const display = findFace(io, .{
+        .family = "Optical Sans",
+        .opsz = 70,
+    }, .{ .roots = &roots }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("OpticalSans-Display", display.postscript_name);
+    try std.testing.expectEqual(@as(?f32, 64), display.opsz_default);
 }

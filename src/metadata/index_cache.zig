@@ -9,7 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const magic = "FNTZIDX1";
-pub const version: u32 = 1;
+pub const version: u32 = 2;
 pub const max_cache_bytes = 64 * 1024 * 1024;
 
 pub const FileStamp = struct {
@@ -98,6 +98,9 @@ fn writeCache(
         try appendInt(u16, buffer, allocator, face.width_class);
         try buffer.append(allocator, @intFromEnum(face.style));
         try buffer.append(allocator, @intFromBool(face.italic) | (@as(u8, @intFromBool(face.monospaced)) << 1));
+        try appendOptionalF32(buffer, allocator, face.opsz_min);
+        try appendOptionalF32(buffer, allocator, face.opsz_default);
+        try appendOptionalF32(buffer, allocator, face.opsz_max);
         try appendString(buffer, allocator, face.family);
         try appendString(buffer, allocator, face.subfamily);
         try appendString(buffer, allocator, face.full_name);
@@ -160,6 +163,9 @@ fn readCache(
         const width_class = reader.readU16() orelse return null;
         const style_byte = reader.readU8() orelse return null;
         const flags = reader.readU8() orelse return null;
+        const opsz_min = readOptionalF32(&reader) orelse return null;
+        const opsz_default = readOptionalF32(&reader) orelse return null;
+        const opsz_max = readOptionalF32(&reader) orelse return null;
         const family = reader.string(allocator) orelse return null;
         const subfamily = reader.string(allocator) orelse return null;
         const full_name = reader.string(allocator) orelse return null;
@@ -188,6 +194,9 @@ fn readCache(
             .italic = (flags & 1) != 0,
             .style = std.enums.fromInt(@FieldType(Face, "style"), style_byte) orelse return null,
             .monospaced = (flags & 2) != 0,
+            .opsz_min = opsz_min.value,
+            .opsz_default = opsz_default.value,
+            .opsz_max = opsz_max.value,
         };
     }
     if (reader.pos != data.len) return null;
@@ -198,6 +207,20 @@ fn appendInt(comptime T: type, buffer: *std.ArrayList(u8), allocator: std.mem.Al
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, .little);
     try buffer.appendSlice(allocator, &bytes);
+}
+
+fn appendOptionalF32(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, value: ?f32) !void {
+    try buffer.append(allocator, @intFromBool(value != null));
+    if (value) |number| try appendInt(u32, buffer, allocator, @bitCast(number));
+}
+
+const OptionalF32 = struct { value: ?f32 };
+
+fn readOptionalF32(reader: *Reader) ?OptionalF32 {
+    const present = reader.readU8() orelse return null;
+    if (present == 0) return .{ .value = null };
+    const bits = reader.readU32() orelse return null;
+    return .{ .value = @bitCast(bits) };
 }
 
 fn appendString(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {

@@ -14,6 +14,7 @@ const Key = struct {
     stretch: u16,
     style: types.Style,
     required_codepoint: ?u21,
+    opsz: ?f32,
     max_candidates: usize,
 
     fn init(allocator: std.mem.Allocator, query: types.Query) !Key {
@@ -37,6 +38,7 @@ const Key = struct {
             .stretch = query.stretch,
             .style = query.style,
             .required_codepoint = query.required_codepoint,
+            .opsz = query.opsz,
             .max_candidates = query.max_candidates,
         };
     }
@@ -56,6 +58,7 @@ const Key = struct {
             self.stretch == query.stretch and
             self.style == query.style and
             self.required_codepoint == query.required_codepoint and
+            self.opsz == query.opsz and
             self.max_candidates == query.max_candidates;
     }
 };
