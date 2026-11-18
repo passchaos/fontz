@@ -85,6 +85,13 @@ pub fn resetForTesting(io: std.Io) void {
     reset(io);
 }
 
+/// Builds the process-wide metadata index without resolving a query. Hosts can
+/// call this from a background worker at startup so the first text layout does
+/// not pay the cold scan. Returns false when the index could not be built.
+pub fn prewarm(io: std.Io, options: Options) bool {
+    return ensureIndex(io, options) != null;
+}
+
 /// Explicitly drop the process-wide index. Callers must not hold `Face`
 /// pointers across this call. `Options` are fixed after the first successful
 /// index build; use this to switch roots/budgets in tests or embedders.

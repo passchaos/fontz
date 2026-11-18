@@ -120,6 +120,17 @@ pub const Discovery = struct {
         );
     }
 
+    /// Builds the metadata index ahead of the first query. Safe to call from a
+    /// background worker; resolution and prewarm serialize on the process-wide
+    /// index mutex.
+    pub fn prewarm(self: *Discovery) bool {
+        const io = std.Options.debug_io;
+        return metadata_index.prewarm(io, .{
+            .roots = self.roots,
+            .generic_mappings = self.generic_mappings,
+        });
+    }
+
     pub fn allFamilyNames(
         self: *Discovery,
         allocator: std.mem.Allocator,
@@ -564,4 +575,30 @@ test "pure provider resolves synthetic roots and generic families" {
     try std.testing.expectEqual(types.Provider.metadata_index, resolution.provider);
     try std.testing.expectEqualStrings("DejaVu Sans", resolution.candidates[0].family.?);
     try std.testing.expectEqual(@as(u16, 700), resolution.candidates[0].weight);
+}
+
+test "pure provider prewarms the metadata index without a query" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const font = try @import("metadata/test_font.zig").buildTestFont(std.testing.allocator, .{
+        .family = "Prewarm Sans",
+        .postscript_name = "PrewarmSans-Regular",
+    });
+    defer std.testing.allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "PrewarmSans-Regular.ttf", .data = font });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const roots = [_][]const u8{path_buffer[0..root_len]};
+    metadata_index.resetForTesting(io);
+    defer metadata_index.resetForTesting(io);
+
+    var discovery = try Discovery.initWithRoots(std.testing.allocator, &roots);
+    defer discovery.deinit();
+    try std.testing.expect(discovery.prewarm());
+    var resolution = try discovery.resolve(std.testing.allocator, .{ .family = "Prewarm Sans" });
+    defer resolution.deinit();
+    try std.testing.expect(resolution.candidates.len > 0);
+    try std.testing.expectEqual(types.Provider.metadata_index, resolution.provider);
+    try std.testing.expectEqualStrings("Prewarm Sans", resolution.candidates[0].family.?);
 }
