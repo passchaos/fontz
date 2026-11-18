@@ -54,6 +54,26 @@ pub const Discovery = struct {
         return self.platform.available();
     }
 
+    /// Build the process-wide metadata index ahead of the first query.
+    ///
+    /// Safe to call from a background worker; resolution and prewarm serialize
+    /// on the process-wide index mutex. Returns false when the index could not
+    /// be built.
+    pub fn prewarm(self: *Discovery) bool {
+        return self.platform.prewarm();
+    }
+
+    /// Prewarm the default-root index without keeping a `Discovery` alive.
+    ///
+    /// Hosts that want the scan off the UI thread can call this from a
+    /// detached worker; the metadata index is process-wide, so the temporary
+    /// discovery only owns the root list for the duration of the scan.
+    pub fn prewarmDefault(allocator: std.mem.Allocator) bool {
+        var discovery = Discovery.init(allocator);
+        defer discovery.deinit();
+        return discovery.prewarm();
+    }
+
     pub fn resolveRole(
         self: *Discovery,
         allocator: std.mem.Allocator,
