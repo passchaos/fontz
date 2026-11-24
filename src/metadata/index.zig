@@ -1,6 +1,6 @@
 //! Bounded system-font metadata discovery for concrete `font-family` names.
 //!
-//! The index reads only sfnt headers plus `name`/`OS/2`/`post` tables; it never
+//! The index reads only sfnt headers plus `name`/`OS/2`/`post`/`fvar` tables; it never
 //! rasterizes and never installs a face until a document selects it. Discovery
 //! is opt-in through `ResourcePolicy.allow_system_fonts` because ambient
 //! filesystem access is a caller decision. The process-wide index is bounded by
@@ -20,7 +20,18 @@ const env = @import("../env.zig");
 const test_font = @import("test_font.zig");
 const metadata_cache = @import("index_cache.zig");
 
+comptime {
+    _ = @import("face_location_tests.zig");
+}
+
 pub const LocalizedName = parse.LocalizedName;
+
+pub const FaceLocation = struct {
+    /// Original zero-based face inside the sfnt/TTC file.
+    face_index: u32,
+    /// Zero is the default face; N selects fvar instance record N - 1.
+    named_instance: u16 = 0,
+};
 
 pub const Face = struct {
     /// Absolute path as `root/entry.path` under the scanned font root.
@@ -220,14 +231,26 @@ pub fn familyNames(
 
 pub const allFamilyNames = familyNames;
 
-/// Resolve the collection face index for a PostScript name by reading only the
-/// font's metadata. Useful when a caller only has a URL + PostScript identity
-/// and needs a TTC index.
+/// Compatibility helper returning the collection face index for either a
+/// default face or a named-instance PostScript name. Use the location helper
+/// when the caller also needs the selected fvar instance.
 pub fn findFaceIndexByPostScript(
     io: std.Io,
     path: []const u8,
     postscript_name: []const u8,
 ) !?u32 {
+    const location = (try findFaceLocationByPostScript(io, path, postscript_name)) orelse return null;
+    return location.face_index;
+}
+
+/// Resolve a URL/path + PostScript identity from bounded font metadata. The
+/// returned value includes the original TTC face index and the fvar instance;
+/// it owns no font data and does not depend on the process-wide catalog.
+pub fn findFaceLocationByPostScript(
+    io: std.Io,
+    path: []const u8,
+    postscript_name: []const u8,
+) !?FaceLocation {
     if (postscript_name.len == 0) return null;
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
@@ -243,9 +266,17 @@ pub fn findFaceIndexByPostScript(
         128 * 1024,
         64 * 1024 * 1024,
     )) orelse return null;
-    for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+    for (collection.faces[0..collection.count]) |meta| {
         if (std.ascii.eqlIgnoreCase(meta.postscript_name, postscript_name)) {
-            return @intCast(face_index);
+            return .{ .face_index = meta.face_index };
+        }
+        for (meta.instances) |instance| {
+            if (std.ascii.eqlIgnoreCase(instance.postscript_name, postscript_name)) {
+                return .{
+                    .face_index = meta.face_index,
+                    .named_instance = instance.index + 1,
+                };
+            }
         }
     }
     return null;
@@ -530,11 +561,11 @@ fn buildIndex(io: std.Io, options: Options) !Index {
             else => continue,
         }) orelse continue;
         metadata_bytes += collection.bytes_read;
-        for (collection.faces[0..collection.count], 0..) |meta, face_index| {
+        for (collection.faces[0..collection.count]) |meta| {
             if (faces.items.len >= options.max_faces) break;
             try faces.append(allocator, .{
                 .path = stamp.path,
-                .face_index = @intCast(face_index),
+                .face_index = meta.face_index,
                 .family = meta.family,
                 .families = meta.families,
                 .subfamily = meta.subfamily,
@@ -554,7 +585,7 @@ fn buildIndex(io: std.Io, options: Options) !Index {
                 if (faces.items.len >= options.max_faces) break;
                 try faces.append(allocator, .{
                     .path = stamp.path,
-                    .face_index = @intCast(face_index),
+                    .face_index = meta.face_index,
                     .named_instance = @intCast(@as(usize, instance.index) + 1),
                     .family = meta.family,
                     .families = meta.families,

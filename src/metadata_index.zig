@@ -8,6 +8,7 @@ const index = @import("metadata/index.zig");
 
 pub const LocalizedName = index.LocalizedName;
 pub const Face = index.Face;
+pub const FaceLocation = index.FaceLocation;
 pub const GenericMapping = index.GenericMapping;
 pub const Options = index.Options;
 pub const prewarm = index.prewarm;
@@ -21,6 +22,7 @@ pub const findByPostScript = index.findByPostScript;
 pub const familyNames = index.familyNames;
 pub const allFamilyNames = index.allFamilyNames;
 pub const findFaceIndexByPostScript = index.findFaceIndexByPostScript;
+pub const findFaceLocationByPostScript = index.findFaceLocationByPostScript;
 pub const familyNamesEqual = index.familyNamesEqual;
 pub const defaultRoots = index.defaultRoots;
 

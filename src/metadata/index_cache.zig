@@ -9,7 +9,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const magic = "FNTZIDX1";
-pub const version: u32 = 2;
+// Version 3 invalidates metadata written before original TTC indexes survived
+// skipped faces. The record layout is unchanged; version 2 may hold wrong IDs
+// even when the current file stamps still match.
+pub const version: u32 = 3;
 pub const max_cache_bytes = 64 * 1024 * 1024;
 
 pub const FileStamp = struct {

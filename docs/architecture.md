@@ -15,7 +15,7 @@ libc.
 | `types` | `Query`, `Candidate`, `Resolution`, `Service`, missing-glyph types |
 | `family` | CSS family-list tokenization, generic-family classification, width-class conversion, UTF-8-aware family comparison |
 | `metadata/index` | bounded sfnt catalog, CSS-like matching, family/PostScript indexes, process-wide cache |
-| `metadata/parse` | sfnt `name`/`OS/2`/`post` parsing |
+| `metadata/parse` | sfnt `name`/`OS/2`/`post`/`fvar` parsing, original TTC face identity |
 | `metadata/fontconfig` | pure-Zig fontconfig XML configuration reader (`<dir>`, `<include>`, `<alias>`) |
 | `metadata/cmap` | minimal `cmap` coverage reader (formats 0, 4, 6, 12, 13) |
 | `fallback_paths` | deterministic path candidates, including CJK face indexes |
@@ -99,7 +99,7 @@ An uncovered `required_codepoint` also returns empty.
 
 ## Metadata index
 
-`metadata_index` reads only sfnt headers plus `name`, `OS/2` and `post`
+`metadata_index` reads only sfnt headers plus `name`, `OS/2`, `post` and `fvar`
 tables. It never rasterizes and never installs a face.
 
 It stores:
@@ -108,7 +108,26 @@ It stores:
   fallback);
 - PostScript name, full name, subfamily;
 - weight, CSS stretch, width class, style, italic and monospaced;
-- path and TTC face index.
+- path and original TTC face index;
+- named-instance identity, exposed as zero for the default or fvar record
+  index + 1.
+
+Metadata for invalid TTC faces is skipped, while each surviving `FaceMetadata`
+retains its original collection index. Packed metadata/catalog array positions
+are internal storage indexes and must not be used as TTC identities.
+
+`findFaceLocationByPostScript(io, path, name)` reads bounded metadata directly
+from one file and returns `{ face_index, named_instance }` for either a base or
+named-instance PostScript name. It does not build the process-wide catalog or
+return borrowed strings. Base names take precedence over duplicate instance
+names, matching catalog insertion order. The legacy face-index-only helper
+delegates to it.
+
+The disk metadata cache format is version 3. Its layout is unchanged, but
+version-2 metadata can contain wrong TTC identities after skipped faces even
+when all path/size/mtime stamps still match. Version and limit-hash validation
+reject those caches and rebuild the catalog; the cache filename and existing
+resource budgets remain unchanged.
 
 Matching uses a normalized family index and a PostScript index. Family
 comparison is UTF-8 aware: ASCII separators are ignored and non-ASCII
@@ -179,6 +198,13 @@ zig build test    # pure Zig; no libc or native font libraries
 zig build check   # cross-compile the pure provider for Windows and macOS
 ```
 
+The deterministic collection/URL identity regressions and their closest
+existing metadata tests can be selected without platform discovery:
+
+```sh
+zig test src/metadata_index.zig --test-filter 'face location' --test-filter 'PostScript lookup' --test-filter 'TT collection' --test-filter 'metadata cache' --test-filter fvar
+```
+
 The cross-target `check` step emits objects only, so it works without a macOS
 SDK or Windows runtime.
 
@@ -189,3 +215,17 @@ Measured on a machine with 2636 installed font files:
 - `metadata_index` warm scan: ~40 ms, cold disk ~1.3 s, peak RSS ~5 MB.
 - The first query builds the index; later family lookups are hash-indexed.
 - Reference-counted cache hits avoid candidate cloning entirely.
+
+## TTC location validation on 2026-11-24
+
+The focused metadata gate passed 9 tests with Zig 0.16.0 on macOS ARM64,
+including malformed collection entries, named instances, original record
+indices, disk-cache reuse and v2 rejection. A separate application using the
+public metadata APIs resolved PingFang SC/TC/HK Regular with default system
+roots. Catalog, location helper and legacy index helper agreed on face indices
+20/21/22; each Regular variant was named instance 1. The CoreText URL and the
+catalog path referred to the same installed PingFangUI collection. Full
+Cangjie parses of these faces and 13 character mappings per region were
+verified separately, with all glyph IDs matching CoreText. This is host
+compatibility evidence, not a portable fixed path or a complete shaping/raster
+qualification.

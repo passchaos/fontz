@@ -1,6 +1,6 @@
 //! Minimal sfnt metadata parser for the bounded font index.
 //!
-//! Reads only the sfnt header, table directory, `name`, `OS/2` and `post`
+//! Reads only the sfnt header, table directory, `name`, `OS/2`, `post` and `fvar`
 //! tables. Raw table bytes come from a scratch allocator; decoded names are
 //! allocated in the persistent index arena.
 
@@ -16,6 +16,9 @@ pub const LocalizedName = struct {
 };
 
 pub const FaceMetadata = struct {
+    /// Original zero-based TTC face index. `readFileMetadata` preserves it
+    /// even when earlier malformed faces are skipped; standalone sfnt is 0.
+    face_index: u32 = 0,
     family: []const u8,
     families: []const LocalizedName,
     subfamily: []const u8,
@@ -97,7 +100,7 @@ pub fn readFileMetadata(
     result.bytes_read += offsets_len;
     for (0..num_fonts) |face_index| {
         const offset = std.mem.readInt(u32, offsets_bytes[face_index * 4 ..][0..4], .big);
-        const meta = try readSfntMetadata(
+        var meta = try readSfntMetadata(
             io,
             file,
             scratch,
@@ -106,6 +109,7 @@ pub fn readFileMetadata(
             max_name_table_bytes,
             remaining_bytes -| result.bytes_read,
         ) orelse continue;
+        meta.face_index = @intCast(face_index);
         result.bytes_read += meta.bytes_read;
         result.faces[result.count] = meta;
         result.count += 1;

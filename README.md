@@ -22,7 +22,9 @@ libc.
   matching and family listings. A versioned metadata cache lives under the
   platform cache directory (`~/Library/Caches/fontz/metadata-v1.bin` on macOS)
   and is validated against the root list plus every font file's path, size, and
-  mtime; writes are atomic and any mismatch falls back to a full scan.
+  mtime; writes are atomic and any mismatch falls back to a full scan. The
+  on-disk format is version 3: older caches are rejected because they may
+  contain TTC indexes renumbered after a malformed face was skipped.
 - `metadata/fontconfig`: pure-Zig reader for fontconfig XML configuration
   (`<dir>`, `<include>`, `<alias>`), including XDG and `~` prefixes. Used on
   Linux to discover configured font directories and generic-family aliases.
@@ -131,12 +133,27 @@ const face = fontz.metadata_index.findFace(
     .{},
 );
 
-const index = try fontz.metadata_index.findFaceIndexByPostScript(
+const location = try fontz.metadata_index.findFaceLocationByPostScript(
     io,
     face.?.path,
     "MPLUS1p-Regular",
 );
+// location.?.face_index is the original sfnt/TTC index.
+// location.?.named_instance is 0 for the default, or fvar record index + 1.
 ```
+
+The direct path + PostScript helper checks both the face's base PostScript name
+and its `fvar` named instances. For a variable face whose base name is Medium,
+a Regular instance resolves to the same collection face with its own
+`named_instance`. Names use the same ASCII case-insensitive comparison as the
+catalog; a duplicate base/instance name selects the default face first. The
+returned `FaceLocation` is an owned value with no borrowed font bytes.
+
+The legacy `findFaceIndexByPostScript` delegates to this helper and returns
+only `face_index`. When earlier or interior TTC faces have invalid metadata,
+they are skipped without renumbering surviving faces. Catalog matches, direct
+PostScript locations and the version-3 disk cache preserve those original
+indexes.
 
 The process-wide index is bounded by file/face/table budgets and is built
 outside its global mutex. Call `metadata_index.reset(io)` to change roots or
@@ -156,6 +173,4 @@ semantics, coverage checks, and ecosystem boundaries.
 ```sh
 zig build test    # pure Zig, no libc or native font libraries
 zig build check   # cross-compile the pure provider for Windows and macOS
-```
- cross-compile the pure provider for Windows and macOS
 ```
