@@ -171,6 +171,22 @@ semantics, coverage checks, and ecosystem boundaries.
 ## Tests
 
 ```sh
-zig build test    # pure Zig, no libc or native font libraries
+zig build test    # pure provider tests plus CoreText oracle on macOS
 zig build check   # cross-compile the pure provider for Windows and macOS
 ```
+
+The published package includes `tests/` so macOS consumers can run
+`zig build test-macos-coretext` after `zig fetch`. CoreText/CoreFoundation are
+linked only by this native differential test; the production provider remains
+pure Zig and links no native font libraries.
+
+Verify the actual exported archive and its literal build inputs:
+
+```sh
+python3 tools/verify_package_export.py --report zig-out/package-export.json
+```
+
+Optional `--configure --metadata-tests --check` runs the focused package gates
+from the exported tree with isolated caches. `--macos-oracle` runs CoreText
+matching on macOS. The package workflow runs these gates on Linux and macOS;
+a local success does not imply the hosted workflow has already completed.

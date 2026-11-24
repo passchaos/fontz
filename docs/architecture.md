@@ -194,7 +194,7 @@ font. `Discovery.reportMissingGlyph` forwards the report to the installed
 ## Verification
 
 ```sh
-zig build test    # pure Zig; no libc or native font libraries
+zig build test    # pure provider tests plus CoreText oracle on macOS
 zig build check   # cross-compile the pure provider for Windows and macOS
 ```
 
@@ -229,3 +229,8 @@ Cangjie parses of these faces and 13 character mappings per region were
 verified separately, with all glyph IDs matching CoreText. This is host
 compatibility evidence, not a portable fixed path or a complete shaping/raster
 qualification.
+
+The published package includes `tests/` so macOS consumers can run
+`zig build test-macos-coretext` after `zig fetch`. CoreText/CoreFoundation are
+linked only by this native differential test; the production provider remains
+pure Zig and links no native font libraries.
