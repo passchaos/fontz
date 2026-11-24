@@ -27,6 +27,8 @@ const Entry = struct {
     /// Null records a structural failure, such as a missing cmap. IO failures
     /// are not installed and therefore remain retryable.
     table: ?[]u8,
+    num_glyphs: ?u16,
+    glyph_count_loaded: bool,
     stamp: u64,
 
     fn bytes(self: Entry) usize {
@@ -86,6 +88,31 @@ pub const Cache = struct {
         codepoint: u21,
         generation: u64,
     ) !bool {
+        return self.covers(io, path, face_index, codepoint, null, generation);
+    }
+
+    pub fn coversVariationSequence(
+        self: *Cache,
+        io: std.Io,
+        path: []const u8,
+        face_index: u32,
+        base: u21,
+        selector: u21,
+        generation: u64,
+    ) !bool {
+        return self.covers(io, path, face_index, base, selector, generation);
+    }
+
+    fn covers(
+        self: *Cache,
+        io: std.Io,
+        path: []const u8,
+        face_index: u32,
+        codepoint: u21,
+        selector: ?u21,
+        generation: u64,
+    ) !bool {
+        if (!@import("../variation.zig").validCoverage(codepoint, selector)) return false;
         if (self.generation == null or self.generation.? != generation) {
             self.clear();
             self.generation = generation;
@@ -99,23 +126,29 @@ pub const Cache = struct {
             if (entry.face_index != face_index or !std.mem.eql(u8, entry.path, path)) continue;
             self.hits += 1;
             entry.stamp = self.stamp;
-            return if (entry.table) |table| cmap.tableCovers(table, codepoint) else false;
+            if (selector != null and entry.table != null and !entry.glyph_count_loaded) {
+                // Failed IO remains retryable; do not record a missing maxp.
+                entry.num_glyphs = try cmap.readGlyphCount(io, path, face_index, &self.reads);
+                entry.glyph_count_loaded = true;
+            }
+            return coveredBy(entry.table, entry.num_glyphs, codepoint, selector);
         }
         self.misses += 1;
-        const table = try cmap.readTable(io, self.allocator, path, face_index, &self.reads);
+        const data = try cmap.readCoverageData(io, self.allocator, path, face_index, selector != null, &self.reads);
+        const table = data.table;
         var adopted = false;
         defer if (!adopted) {
             if (table) |bytes| self.allocator.free(bytes);
         };
-        const covered = if (table) |bytes| cmap.tableCovers(bytes, codepoint) else false;
+        const covered = coveredBy(table, data.num_glyphs, codepoint, selector);
         // Cache installation is best effort. A failed key/entry allocation must
         // not turn a successfully read glyph into a missing glyph.
-        adopted = self.put(path, face_index, table) catch false;
+        adopted = self.put(path, face_index, table, data.num_glyphs, selector != null) catch false;
         return covered;
     }
 
     /// Adopts table only on true. Oversized/disabled caches query uncached.
-    fn put(self: *Cache, path: []const u8, face_index: u32, table: ?[]u8) !bool {
+    fn put(self: *Cache, path: []const u8, face_index: u32, table: ?[]u8, num_glyphs: ?u16, glyph_count_loaded: bool) !bool {
         const bytes = std.math.add(usize, path.len, if (table) |data| data.len else 0) catch return false;
         if (self.limits.entries == 0 or bytes > self.limits.bytes) return false;
         const owned_path = try self.allocator.dupe(u8, path);
@@ -132,6 +165,8 @@ pub const Cache = struct {
             .path = owned_path,
             .face_index = face_index,
             .table = table,
+            .num_glyphs = num_glyphs,
+            .glyph_count_loaded = glyph_count_loaded,
             .stamp = self.stamp,
         });
         self.resident_bytes += bytes;
@@ -148,3 +183,9 @@ pub const Cache = struct {
         entry.deinit(self.allocator);
     }
 };
+
+fn coveredBy(table: ?[]const u8, num_glyphs: ?u16, base: u21, selector: ?u21) bool {
+    const bytes = table orelse return false;
+    if (selector) |value| return cmap.tableCoversVariationSequence(bytes, base, value, num_glyphs orelse return false);
+    return cmap.tableCovers(bytes, base);
+}

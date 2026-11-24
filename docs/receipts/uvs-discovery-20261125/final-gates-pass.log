@@ -1,0 +1,18 @@
+[traex-zig-guard 2026-11-25 04:55:50] started Zig tree root=41361 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 14/14 steps succeeded; 45/45 tests passed
+test-coverage-matching success
++- run test 27 pass (27 total) 655ms MaxRSS:5M
+   +- compile test Debug native success 1s MaxRSS:348M
+test-variation-sequences success
++- run test 17 pass (17 total) 402ms MaxRSS:4M
+   +- compile test Debug native success 1s MaxRSS:339M
+test-variation-api success
++- run test 1 pass (1 total) 401ms MaxRSS:3M
+   +- compile test Debug native success 1s MaxRSS:327M
+check success
++- compile obj fontz-windows-check Debug x86_64-windows success 424ms MaxRSS:84M
++- compile obj fontz-macos-check Debug aarch64-macos success 478ms MaxRSS:85M
++- compile test Debug aarch64-linux success 738ms MaxRSS:138M
++- compile test Debug aarch64-macos success 712ms MaxRSS:135M
+
+[traex-zig-guard 2026-11-25 04:55:58] finished Zig tree root=41361 peak=298MiB result=0

@@ -1,0 +1,5 @@
+[traex-zig-guard 2026-11-25 05:00:34] started Zig tree root=75332 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+1/2 root.test_0...OK
+2/2 metadata_index.test_0...OK
+All 2 tests passed.
+[traex-zig-guard 2026-11-25 05:00:37] finished Zig tree root=75332 peak=220MiB result=0

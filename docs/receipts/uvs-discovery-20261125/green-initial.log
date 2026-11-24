@@ -1,0 +1,10 @@
+[traex-zig-guard 2026-11-25 04:48:22] started Zig tree root=25869 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 6/6 steps succeeded; 23/23 tests passed
+test-coverage-matching success
++- run test 21 pass (21 total) 531ms MaxRSS:4M
+   +- compile test Debug native success 2s MaxRSS:350M
+test-variation-sequences success
++- run test 2 pass (2 total) 401ms MaxRSS:2M
+   +- compile test Debug native success 1s MaxRSS:302M
+
+[traex-zig-guard 2026-11-25 04:48:29] finished Zig tree root=25869 peak=711MiB result=0

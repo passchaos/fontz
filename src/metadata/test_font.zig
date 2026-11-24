@@ -30,6 +30,8 @@ pub const TestFontOptions = struct {
     opsz: ?TestAxis = null,
     /// Optional cmap bytes for coverage-cache workloads.
     cmap: ?[]const u8 = null,
+    /// Optional maxp for glyph-bound eligibility tests.
+    num_glyphs: ?u16 = null,
 };
 
 pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
@@ -136,14 +138,15 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     defer if (fvar_table) |table| allocator.free(table);
     const os2_len = 96;
     const post_len = 32;
-    const table_count: u16 = @as(u16, if (fvar_table != null) 4 else 3) + @as(u16, @intFromBool(options.cmap != null));
+    const table_count: u16 = @as(u16, if (fvar_table != null) 4 else 3) + @as(u16, @intFromBool(options.cmap != null)) + @as(u16, @intFromBool(options.num_glyphs != null));
     const dir_len = @as(usize, table_count) * 16;
     const name_offset = 12 + dir_len;
     const os2_offset = align4(name_offset + name_table.len);
     const post_offset = align4(os2_offset + os2_len);
     const fvar_offset = align4(post_offset + post_len);
     const cmap_offset = align4(fvar_offset + (if (fvar_table) |table| table.len else 0));
-    const total = align4(cmap_offset + (if (options.cmap) |table| table.len else 0));
+    const maxp_offset = align4(cmap_offset + (if (options.cmap) |table| table.len else 0));
+    const total = align4(maxp_offset + (if (options.num_glyphs != null) @as(usize, 6) else 0));
     const bytes = try allocator.alloc(u8, total);
     @memset(bytes, 0);
     std.mem.writeInt(u32, bytes[0..4], 0x00010000, .big);
@@ -159,6 +162,12 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     if (options.cmap) |table| {
         writeTestTableRecord(bytes, if (fvar_table != null) 4 else 3, "cmap", cmap_offset, table.len);
         @memcpy(bytes[cmap_offset..][0..table.len], table);
+    }
+    if (options.num_glyphs) |count| {
+        const table_index = @as(usize, if (fvar_table != null) 4 else 3) + @intFromBool(options.cmap != null);
+        writeTestTableRecord(bytes, table_index, "maxp", maxp_offset, 6);
+        std.mem.writeInt(u32, bytes[maxp_offset..][0..4], 0x00005000, .big);
+        std.mem.writeInt(u16, bytes[maxp_offset + 4 ..][0..2], count, .big);
     }
     @memcpy(bytes[name_offset..][0..name_table.len], name_table);
     const os2 = bytes[os2_offset..][0..os2_len];

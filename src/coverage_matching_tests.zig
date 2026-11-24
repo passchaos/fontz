@@ -11,6 +11,10 @@ const coverage_cache = @import("metadata/coverage_cache.zig");
 const io = std.testing.io;
 const allocator = std.testing.allocator;
 
+comptime {
+    _ = @import("variation_matching_tests.zig");
+}
+
 const Fixture = struct {
     tmp: std.testing.TmpDir,
     root: []u8,

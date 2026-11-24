@@ -43,6 +43,33 @@ pub fn build(b: *std.Build) void {
     coverage_matching_step.dependOn(&run_coverage_matching_tests.step);
     test_step.dependOn(&run_coverage_matching_tests.step);
 
+    const variation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/variation_sequence_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"variation sequence"},
+    });
+    const run_variation_tests = b.addRunArtifact(variation_tests);
+    const variation_step = b.step("test-variation-sequences", "Run cmap14, coverage cache, and fallback sequence regressions");
+    variation_step.dependOn(&run_variation_tests.step);
+    test_step.dependOn(&run_variation_tests.step);
+
+    const variation_api_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/variation_api_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fontz", .module = mod }},
+        }),
+        .filters = &.{"variation sequence published API"},
+    });
+    const run_variation_api_tests = b.addRunArtifact(variation_api_tests);
+    const variation_api_step = b.step("test-variation-api", "Run published variation sequence API consumer regression");
+    variation_api_step.dependOn(&run_variation_api_tests.step);
+    test_step.dependOn(&run_variation_api_tests.step);
+
     if (target.result.os.tag == .macos) {
         const coretext_tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -94,4 +121,27 @@ pub fn build(b: *std.Build) void {
         .root_module = macos_mod,
     });
     check_step.dependOn(&macos_obj.step);
+
+    // Compile calls to the new published API on the affected native providers;
+    // declaration-only objects can leave function bodies lazily unanalyzed.
+    for ([_]std.Build.ResolvedTarget{
+        b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux }),
+        macos_target,
+    }) |check_target| {
+        const check_fontz = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = check_target,
+            .optimize = optimize,
+        });
+        const check_api = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/variation_api_test.zig"),
+                .target = check_target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "fontz", .module = check_fontz }},
+            }),
+            .filters = &.{"variation sequence published API"},
+        });
+        check_step.dependOn(&check_api.step);
+    }
 }

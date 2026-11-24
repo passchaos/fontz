@@ -135,6 +135,9 @@ pub const ReadLease = struct {
     }
 
     pub fn findFace(self: ReadLease, query: types.Query, options: Options) ?*const Face {
+        // This method ranks metadata without coverage proof. Sequence callers
+        // must use a coverage filter or the public discovery service.
+        if (!query.validCoverage() or query.required_variation_selector != null) return null;
         const snapshot = self.snapshot orelse return null;
         return findFaceInIndex(&snapshot.payload, query, options);
     }
@@ -143,6 +146,7 @@ pub const ReadLease = struct {
     /// eligibility filter. The lease keeps all inspected metadata alive.
     /// A PostScript query checks only that exact face, without family fallback.
     pub fn findFaceFiltered(self: ReadLease, allocator: std.mem.Allocator, query: types.Query, options: Options, filter: anytype) !?*const Face {
+        if (!query.validCoverage()) return null;
         const snapshot = self.snapshot orelse return null;
         const index = &snapshot.payload;
         if (query.postscript_name) |requested| {
@@ -259,7 +263,10 @@ pub fn findFamily(
 /// `query.required_codepoint` is accepted for API symmetry but is not verified
 /// here: this index intentionally does not parse `cmap`. Native providers or
 /// Cangjie remain responsible for coverage proof.
+/// A variation sequence constraint returns null; use `Discovery` or
+/// `ReadLease.findFaceFiltered` with a complete sequence coverage filter.
 pub fn findFace(io: std.Io, query: types.Query, options: Options) ?*const Face {
+    if (!query.validCoverage() or query.required_variation_selector != null) return null;
     var lease = acquireRead(io, options);
     defer lease.deinit();
     return lease.findFace(query, options);

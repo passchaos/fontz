@@ -94,6 +94,11 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: Query,
     ) !Resolution {
+        if (!query.validCoverage()) return .{
+            .allocator = allocator,
+            .candidates = try allocator.alloc(Candidate, 0),
+            .provider = .metadata_index,
+        };
         var platform_query = query;
         if (query.family.len == 0) {
             if (query.required_codepoint) |codepoint| {
@@ -112,6 +117,11 @@ pub const Discovery = struct {
             return try fallbackResolutionForQuery(&self.platform, allocator, query);
         }
         return resolution;
+    }
+
+    /// Prove complete Unicode variation sequence support for an exact face.
+    pub fn coversVariationSequence(self: *Discovery, path: []const u8, face_index: u32, base: u21, selector: u21) !bool {
+        return self.platform.coversVariationSequence(path, face_index, base, selector);
     }
 
     pub fn refresh(self: *Discovery) !bool {
@@ -261,11 +271,23 @@ fn buildFallbackResolution(
         for (output.items) |*candidate| candidate.deinit();
         output.deinit(allocator);
     }
+    if (!query.validCoverage() or query.max_candidates == 0) return .{
+        .allocator = allocator,
+        .candidates = try allocator.alloc(Candidate, 0),
+        .provider = .fallback_paths,
+    };
     const family_hint = firstFamily(query.family);
     for (candidates) |candidate| {
         if (!pathExists(candidate.path)) continue;
         if (query.required_codepoint) |codepoint| {
-            if (!(discovery.coversCodepoint(candidate.path, candidate.face_index, codepoint) catch false)) continue;
+            const covered = if (query.required_variation_selector) |selector|
+                discovery.coversVariationSequence(candidate.path, candidate.face_index, codepoint, selector)
+            else
+                discovery.coversCodepoint(candidate.path, candidate.face_index, codepoint);
+            if (!(covered catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => false,
+            })) continue;
         }
         var resolved = try Candidate.init(
             allocator,
@@ -283,7 +305,10 @@ fn buildFallbackResolution(
             query.style,
             monospaced,
         );
-        try output.append(allocator, resolved);
+        output.append(allocator, resolved) catch |err| {
+            resolved.deinit();
+            return err;
+        };
     }
     return .{
         .allocator = allocator,
@@ -389,4 +414,12 @@ test "coverage fallback construction reuses the provider table for different que
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "variation sequence root fallback builder proves sequence and propagates OOM" {
+    try @import("variation_fallback_tests.zig").exerciseBuilder(buildFallbackResolution);
+}
+
+test "variation sequence root role fallback rejects selector without base" {
+    try @import("variation_fallback_tests.zig").exerciseRoleBuilder(fallbackResolution);
 }

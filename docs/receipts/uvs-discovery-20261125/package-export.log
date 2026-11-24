@@ -1,0 +1,171 @@
+run from exported package: /Users/bytedance/.local/share/traex-guard/bin/zig build --cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-cache --global-cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-global-cache --help -j1 cwd: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/exported/fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH
+Usage: /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig build [steps] [options]
+
+Steps:
+  install (default)            Copy build artifacts to prefix path
+  uninstall                    Remove build artifacts from prefix path
+  test                         Run fontz tests
+  test-concurrency             Run catalog lifecycle, cache epoch, and OOM regressions
+  test-coverage-matching       Run coverage-aware catalog matching regressions
+  test-variation-sequences     Run cmap14, coverage cache, and fallback sequence regressions
+  test-variation-api           Run published variation sequence API consumer regression
+  test-macos-coretext          Run the macOS Core Text font-matching differential
+  check                        Compile platform providers for Windows and macOS
+
+Project-Specific Options:
+  -Dtarget=[string]            The CPU architecture, OS, and ABI to build for
+  -Dcpu=[string]               Target CPU features to add or subtract
+  -Dofmt=[string]              Target object format
+  -Ddynamic-linker=[string]    Path to interpreter on the target system
+  -Doptimize=[enum]            Prioritize performance, safety, or binary size
+                                 Supported Values:
+                                   Debug
+                                   ReleaseSafe
+                                   ReleaseFast
+                                   ReleaseSmall
+
+System Integration Options:
+  --search-prefix [path]       Add a path to look for binaries, libraries, headers
+  --sysroot [path]             Set the system root directory (usually /)
+  --libc [file]                Provide a file which specifies libc paths
+
+  --system [pkgdir]            Disable package fetching; enable all integrations
+  -fsys=[name]                 Enable a system integration
+  -fno-sys=[name]              Disable a system integration
+
+  -fdarling,  -fno-darling     Integration with system-installed Darling to
+                               execute macOS programs on Linux hosts
+                               (default: no)
+  -fqemu,     -fno-qemu        Integration with system-installed QEMU to execute
+                               foreign-architecture programs on Linux hosts
+                               (default: no)
+  --libc-runtimes [path]       Enhances QEMU integration by providing dynamic libc
+                               (e.g. glibc or musl) built for multiple foreign
+                               architectures, allowing execution of non-native
+                               programs that link with libc.
+  -frosetta,  -fno-rosetta     Rely on Rosetta to execute x86_64 programs on
+                               ARM64 macOS hosts. (default: no)
+  -fwasmtime, -fno-wasmtime    Integration with system-installed wasmtime to
+                               execute WASI binaries. (default: no)
+  -fwine,     -fno-wine        Integration with system-installed Wine to execute
+                               Windows programs on Linux hosts. (default: no)
+
+  Available System Integrations:                Enabled:
+  (none)                                        -
+
+General Options:
+  -h, --help                   Print this help and exit
+  -l, --list-steps             Print available steps
+
+  -p, --prefix [path]          Where to install files (default: zig-out)
+  --prefix-lib-dir [path]      Where to install libraries
+  --prefix-exe-dir [path]      Where to install executables
+  --prefix-include-dir [path]  Where to install C header files
+  --release[=mode]             Request release mode, optionally specifying a
+                               preferred optimization mode: fast, safe, small
+
+  --verbose                    Print commands before executing them
+  --color [auto|off|on]        Enable or disable colored error messages
+  --error-style [style]        Control how build errors are printed
+    verbose                    (Default) Report errors with full context
+    minimal                    Report errors after summary, excluding context like command lines
+    verbose_clear              Like 'verbose', but clear the terminal at the start of each update
+    minimal_clear              Like 'minimal', but clear the terminal at the start of each update
+  --multiline-errors [style]   Control how multi-line error messages are printed
+    indent                     (Default) Indent non-initial lines to align with initial line
+    newline                    Include a leading newline so that the error message is on its own lines
+    none                       Print as usual so the first line is misaligned
+  --summary [mode]             Control the printing of the build summary
+    all                        Print the build summary in its entirety
+    new                        Omit cached steps
+    failures                   (Default if short-lived) Only print failed steps
+    line                       (Default if long-lived) Only print the single-line summary
+    none                       Do not print the build summary
+  -j<N>                        Limit concurrent jobs (default is to use all CPU cores)
+  --maxrss <bytes>             Limit memory usage (default is to use available memory)
+  --skip-oom-steps             Instead of failing, skip steps that would exceed --maxrss
+  --test-timeout <timeout>     Limit execution time of unit tests, terminating if exceeded.
+                               The timeout must include a unit: ns, us, ms, s, m, h
+  --watch                      Continuously rebuild when source files are modified
+  --debounce <ms>              Delay before rebuilding after changed file detected
+  --webui[=ip]                 Enable the web interface on the given IP address
+  --fuzz[=limit]               Continuously search for unit test failures with an optional 
+                               limit to the max number of iterations. The argument supports
+                               an optional 'K', 'M', or 'G' suffix (e.g. '10K'). Implies
+                               '--webui' when no limit is specified.
+  --time-report                Force full rebuild and provide detailed information on
+                               compilation time of Zig source code (implies '--webui')
+     -fincremental             Enable incremental compilation
+  -fno-incremental             Disable incremental compilation
+
+Package Management Options:
+  --fetch[=mode]               Fetch dependency tree (optionally choose laziness) and exit
+    needed                     (Default) Lazy dependencies are fetched as needed
+    all                        Lazy dependencies are always fetched
+  --fork=[path]                Override one or more projects from dependency tree
+
+Advanced Options:
+  -freference-trace[=num]      How many lines of reference trace should be shown per compile error
+  -fno-reference-trace         Disable reference trace
+  -fallow-so-scripts           Allows .so files to be GNU ld scripts
+  -fno-allow-so-scripts        (default) .so files must be ELF files
+  --build-file [file]          Override path to build.zig
+  --cache-dir [path]           Override path to local Zig cache directory
+  --global-cache-dir [path]    Override path to global Zig cache directory
+  --zig-lib-dir [arg]          Override path to Zig lib directory
+  --build-runner [file]        Override path to build runner
+  --seed [integer]             For shuffling dependency traversal order (default: random)
+  --build-id[=style]           At a minor link-time expense, embeds a build ID in binaries
+      fast                     8-byte non-cryptographic hash (COFF, ELF, WASM)
+      sha1, tree               20-byte cryptographic hash (ELF, WASM)
+      md5                      16-byte cryptographic hash (ELF)
+      uuid                     16-byte random UUID (ELF, WASM)
+      0x[hexstring]            Constant ID, maximum 32 bytes (ELF, WASM)
+      none                     (default) No build ID
+  --debug-log [scope]          Enable debugging the compiler
+  --debug-pkg-config           Fail if unknown pkg-config flags encountered
+  --debug-rt                   Debug compiler runtime libraries
+  --verbose-link               Enable compiler debug output for linking
+  --verbose-air                Enable compiler debug output for Zig AIR
+  --verbose-llvm-ir[=file]     Enable compiler debug output for LLVM IR
+  --verbose-llvm-bc=[file]     Enable compiler debug output for LLVM BC
+  --verbose-cimport            Enable compiler debug output for C imports
+  --verbose-cc                 Enable compiler debug output for C compilation
+  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
+[traex-zig-guard 2026-11-25 04:58:13] started Zig tree root=8619 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+[traex-zig-guard 2026-11-25 04:58:19] finished Zig tree root=8619 peak=427MiB result=0
+run from exported package: /Users/bytedance/.local/share/traex-guard/bin/zig build --cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-cache --global-cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-global-cache check -j1 --summary all cwd: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/exported/fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH
+[traex-zig-guard 2026-11-25 04:58:19] started Zig tree root=11045 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 5/5 steps succeeded
+check success
++- compile obj fontz-windows-check Debug x86_64-windows success 286ms MaxRSS:86M
++- compile obj fontz-macos-check Debug aarch64-macos success 286ms MaxRSS:87M
++- compile test Debug aarch64-linux success 580ms MaxRSS:139M
++- compile test Debug aarch64-macos success 545ms MaxRSS:136M
+
+[traex-zig-guard 2026-11-25 04:58:20] finished Zig tree root=11045 peak=134MiB result=0
+run from exported package: /Users/bytedance/.local/share/traex-guard/bin/zig build --cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-cache --global-cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-global-cache test-coverage-matching -j1 --summary all cwd: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/exported/fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH
+[traex-zig-guard 2026-11-25 04:58:20] started Zig tree root=11907 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 3/3 steps succeeded; 28/28 tests passed
+test-coverage-matching success
++- run test 28 pass (28 total) 589ms MaxRSS:5M
+   +- compile test Debug native success 1s MaxRSS:352M
+
+[traex-zig-guard 2026-11-25 04:58:23] finished Zig tree root=11907 peak=269MiB result=0
+run from exported package: /Users/bytedance/.local/share/traex-guard/bin/zig build --cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-cache --global-cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-global-cache test-variation-sequences -j1 --summary all cwd: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/exported/fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH
+[traex-zig-guard 2026-11-25 04:58:23] started Zig tree root=13005 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 3/3 steps succeeded; 17/17 tests passed
+test-variation-sequences success
++- run test 17 pass (17 total) 422ms MaxRSS:4M
+   +- compile test Debug native success 1s MaxRSS:335M
+
+[traex-zig-guard 2026-11-25 04:58:26] finished Zig tree root=13005 peak=256MiB result=0
+run from exported package: /Users/bytedance/.local/share/traex-guard/bin/zig build --cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-cache --global-cache-dir /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/build-global-cache test-variation-api -j1 --summary all cwd: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/fontz-package-export-suj870tx/exported/fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH
+[traex-zig-guard 2026-11-25 04:58:26] started Zig tree root=14516 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 3/3 steps succeeded; 1/1 tests passed
+test-variation-api success
++- run test 1 pass (1 total) 464ms MaxRSS:3M
+   +- compile test Debug native success 1s MaxRSS:331M
+
+[traex-zig-guard 2026-11-25 04:58:28] finished Zig tree root=14516 peak=253MiB result=0
+package export verified: fontz-0.1.0-rub7YBPVBwA3RXKsxNHpRdExaqBctZ_h89pIGIl_JaFH gates: build-graph, platform-declarations, catalog-coverage-matching, variation-sequences, variation-api

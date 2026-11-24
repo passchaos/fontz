@@ -1,0 +1,8 @@
+[traex-zig-guard 2026-11-25 05:01:53] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 05:03:43] started Zig tree root=63202 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+1/4 src.metadata.cmap.test.format 4 cmap checks BMP segments...OK
+2/4 src.metadata.cmap.test.format 12 cmap checks full-repertoire groups...OK
+3/4 src.metadata.cmap.test.subtable selection prefers format 12 over format 4...OK
+4/4 src.metadata.cmap.test.coverage cmap malformed offsets and overflowing glyph groups return false...OK
+All 4 tests passed.
+[traex-zig-guard 2026-11-25 05:03:45] finished Zig tree root=63202 peak=180MiB result=0

@@ -89,6 +89,7 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: types.Query,
     ) !types.Resolution {
+        if (!query.validCoverage()) return emptyResolution(allocator);
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
         return try query_cache.Cache.resolveCached(
@@ -150,6 +151,14 @@ pub const Discovery = struct {
         return self.coverage.coversCodepoint(std.Options.debug_io, path, face_index, codepoint, metadata_index.generation());
     }
 
+    /// Sequence coverage shares the retained cmap with scalar discovery. A
+    /// selector's nondefault mapping can cover a base absent from nominal cmap.
+    pub fn coversVariationSequence(self: *Discovery, path: []const u8, face_index: u32, base: u21, selector: u21) !bool {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        return self.coverage.coversVariationSequence(std.Options.debug_io, path, face_index, base, selector, metadata_index.generation());
+    }
+
     /// Builds the metadata index ahead of the first query. Safe to call from a
     /// background worker. Owner configuration reads serialize with refresh;
     /// cold catalog builds serialize across owners.
@@ -193,7 +202,7 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: types.Query,
     ) !query_cache.EpochResolution {
-        if (query.max_candidates == 0) return .{
+        if (!query.validCoverage() or query.max_candidates == 0) return .{
             .resolution = try emptyResolution(allocator),
             .index_generation = metadata_index.generation(),
         };
@@ -210,6 +219,7 @@ pub const Discovery = struct {
                 .cache = &self.coverage,
                 .io = io,
                 .codepoint = codepoint,
+                .variation_selector = query.required_variation_selector,
                 .epoch = lease.epoch,
             };
             // Script hints must not discard the authored family list or user
@@ -253,7 +263,14 @@ pub const Discovery = struct {
             if (candidates.items.len >= query.max_candidates) break;
             if (!pathExists(fallback.path)) continue;
             if (query.required_codepoint) |codepoint| {
-                if (!(self.coverage.coversCodepoint(io, fallback.path, fallback.face_index, codepoint, lease.epoch) catch false)) continue;
+                const filter = coverage_filter.Filter{
+                    .cache = &self.coverage,
+                    .io = io,
+                    .codepoint = codepoint,
+                    .variation_selector = query.required_variation_selector,
+                    .epoch = lease.epoch,
+                };
+                if (!try filter.accept(fallback)) continue;
             }
             if (containsCandidate(candidates.items, fallback.path, fallback.face_index)) continue;
             var candidate = try types.Candidate.init(

@@ -76,6 +76,23 @@ are mapped through platform defaults and fontconfig aliases. `weight` is
 1..1000, `stretch` is a CSS percentage (100 is normal), and
 `required_codepoint` must be a Unicode scalar.
 
+Set `required_variation_selector` with `required_codepoint` as the base to
+require a complete Unicode variation sequence. Valid selectors are VS1–16
+(`FE00..FE0F`) and supplementary IVS (`E0100..E01EF`). Discovery checks cmap
+format 14: default sequences require a valid nominal glyph, and nondefault
+sequences can select a face whose nominal cmap lacks the base. Invalid queries
+return no candidates without catalog or font-file IO. Unsupported sequences
+also return no candidates; a consumer that wants nominal fallback must issue
+a separate query with `required_variation_selector = null`.
+
+`Discovery.coversVariationSequence(path, face_index, base, selector)` proves
+sequence support for an exact face. Coverage tables are shared with scalar
+queries; glyph-count metadata is loaded only when sequence validation needs
+it. `zig build test-coverage-matching test-variation-sequences test-variation-api
+-j1` runs the focused catalog, cmap14/cache/fallback, and published API gates.
+The package export verifier supports `--variation-sequence-tests` and verifies
+that each exported gate executes all its declared named tests.
+
 The runtime-injectable contract is `fontz.Service`:
 
 ```zig

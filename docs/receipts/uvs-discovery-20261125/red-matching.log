@@ -1,0 +1,73 @@
+[traex-zig-guard 2026-11-25 04:45:13] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 04:46:49] started Zig tree root=81460 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-coverage-matching
++- run test 18 pass, 3 fail (21 total)
+error: 'variation_matching_tests.test.coverage matching variation sequence skips nominal best for nondefault only sibling' failed:
+       ====== expected this output: =========
+       UVS-Only␃
+       
+       ======== instead found this: =========
+       UVS-Nominal␃
+       
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       UVS-Only
+           ^ ('\x4f')
+       found:
+       UVS-Nominal
+           ^ ('\x4e')
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:682:9: 0x104344dd3 in expectEqualStrings (test)
+               return error.TestExpectedEqual;
+               ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:53:5: 0x1043d72b3 in expectPostscript (test)
+           try std.testing.expectEqualStrings(name, resolution.candidates[0].postscript_name.?);
+           ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:65:5: 0x1043d8bdf in test.coverage matching variation sequence skips nominal best for nondefault only sibling (test)
+           try expectPostscript(result, "UVS-Only");
+           ^
+error: 'variation_matching_tests.test.coverage matching variation sequence default requires nominal and unsupported resolves empty' failed:
+       expected 0, found 1
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x104344b23 in expectEqualInner__anon_38242 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1043d8657 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:81:5: 0x1043d873b in test.coverage matching variation sequence default requires nominal and unsupported resolves empty (test)
+           try std.testing.expectEqual(@as(usize, 0), missing.candidates.len);
+           ^
+error: 'variation_matching_tests.test.coverage matching variation sequence TTC preserves nondefault face and named instance' failed:
+       ====== expected this output: =========
+       UVSTTC-Light␃
+       
+       ======== instead found this: =========
+       UVSTTC-Nominal␃
+       
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       UVSTTC-Light
+              ^ ('\x4c')
+       found:
+       UVSTTC-Nominal
+              ^ ('\x4e')
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:682:9: 0x104344dd3 in expectEqualStrings (test)
+               return error.TestExpectedEqual;
+               ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:53:5: 0x1043d72b3 in expectPostscript (test)
+           try std.testing.expectEqualStrings(name, resolution.candidates[0].postscript_name.?);
+           ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:99:5: 0x1043d7a4b in test.coverage matching variation sequence TTC preserves nondefault face and named instance (test)
+           try expectPostscript(result, "UVSTTC-Light");
+           ^
+failed command: ./.zig-cache/o/8021db271364f8dbaa1bc50fe7fe4f38/test --cache-dir=./.zig-cache --seed=0xf9f23a75 --listen=-
+
+Build Summary: 1/3 steps succeeded (1 failed); 18/21 tests passed (3 failed)
+test-coverage-matching transitive failure
++- run test 18 pass, 3 fail (21 total)
+   +- compile test Debug native success 1s MaxRSS:347M
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4a778784882ff0fbf9c1e79b3b5e19c1/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/fontz-uvs-discovery-20261125 .zig-cache /Users/bytedance/.cache/zig --seed 0xf9f23a75 -Zd5bc590aac63296b test-coverage-matching -j1 --summary all
+[traex-zig-guard 2026-11-25 04:46:56] finished Zig tree root=81460 peak=521MiB result=0

@@ -20,6 +20,7 @@ const Key = struct {
     stretch: u16,
     style: types.Style,
     required_codepoint: ?u21,
+    required_variation_selector: ?u21,
     opsz: ?f32,
     max_candidates: usize,
 
@@ -44,6 +45,7 @@ const Key = struct {
             .stretch = query.stretch,
             .style = query.style,
             .required_codepoint = query.required_codepoint,
+            .required_variation_selector = query.required_variation_selector,
             .opsz = query.opsz,
             .max_candidates = query.max_candidates,
         };
@@ -64,6 +66,7 @@ const Key = struct {
             self.stretch == query.stretch and
             self.style == query.style and
             self.required_codepoint == query.required_codepoint and
+            self.required_variation_selector == query.required_variation_selector and
             self.opsz == query.opsz and
             self.max_candidates == query.max_candidates;
     }
@@ -104,6 +107,11 @@ pub const Cache = struct {
         query: types.Query,
         owner: anytype,
     ) !types.Resolution {
+        if (!query.validCoverage()) return .{
+            .allocator = allocator,
+            .candidates = try allocator.alloc(types.Candidate, 0),
+            .provider = .metadata_index,
+        };
         if (try cache.get(query, generation, index_generation, allocator)) |hit| return hit;
         const resolved = try owner.resolveUncachedLocked(owner.allocator, query);
         var resolution = resolved.resolution;
@@ -252,4 +260,38 @@ test "query cache owns positive and negative resolutions" {
 
     // A new process-wide index generation invalidates every cached query.
     try std.testing.expect((try cache.get(query, 1, 1, std.testing.allocator)) == null);
+}
+
+test "variation sequence query cache keys base selector and nominal resolutions independently" {
+    const a = std.testing.allocator;
+    var cache = Cache.init(a);
+    defer cache.deinit();
+    const covered = types.Query{ .family = "UVS Cache", .required_codepoint = 0x2764, .required_variation_selector = 0xfe0f };
+    var candidates = try a.alloc(types.Candidate, 1);
+    candidates[0] = try types.Candidate.init(a, "/fixture/uvs.ttf", "UVS Cache", "UVSCache-Regular", 3, 3, 1, .metadata_index);
+    try cache.put(covered, 1, 5, .{ .allocator = a, .candidates = candidates, .provider = .metadata_index });
+    var unsupported = covered;
+    unsupported.required_variation_selector = 0xfe0e;
+    try cache.put(unsupported, 1, 5, .{ .allocator = a, .candidates = try a.alloc(types.Candidate, 0), .provider = .metadata_index });
+    var hit = (try cache.get(covered, 1, 5, a)).?;
+    defer hit.deinit();
+    try std.testing.expectEqual(@as(usize, 1), hit.candidates.len);
+    try std.testing.expectEqual(@as(?u32, 3), hit.candidates[0].face_index);
+    try std.testing.expectEqual(@as(u16, 1), hit.candidates[0].named_instance);
+    var negative = (try cache.get(unsupported, 1, 5, a)).?;
+    defer negative.deinit();
+    try std.testing.expectEqual(@as(usize, 0), negative.candidates.len);
+    var different_base = covered;
+    different_base.required_codepoint = 0x4e2d;
+    try std.testing.expect((try cache.get(different_base, 1, 5, a)) == null);
+    var nominal = covered;
+    nominal.required_variation_selector = null;
+    try std.testing.expect((try cache.get(nominal, 1, 5, a)) == null);
+    try std.testing.expect((try cache.get(covered, 1, 6, a)) == null);
+    try std.testing.expect((try cache.get(unsupported, 2, 5, a)) == null);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var retained = (try cache.get(covered, 1, 5, fail.allocator())).?;
+    defer retained.deinit();
+    try std.testing.expect(hit.shared == retained.shared);
+    try std.testing.expectEqual(@as(usize, 0), fail.allocations);
 }

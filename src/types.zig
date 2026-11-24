@@ -31,8 +31,8 @@ pub const Style = enum {
 ///
 /// `weight` is an OpenType/CSS weight in the range 1..1000 (400 is regular).
 /// `stretch` is a CSS font-stretch percentage (100 is normal, valid roughly
-/// 50..200). `required_codepoint` must be a Unicode scalar value; callers
-/// should reject surrogate and out-of-range values before building a query.
+/// 50..200). Invalid scalar/selector coverage constraints fail closed without
+/// catalog or font-file IO.
 pub const Query = struct {
     family: []const u8,
     postscript_name: ?[]const u8 = null,
@@ -41,10 +41,18 @@ pub const Query = struct {
     style: Style = .normal,
     language: ?[]const u8 = null,
     required_codepoint: ?u21 = null,
+    /// Require this Unicode variation sequence with `required_codepoint` as
+    /// its base. VS1..16 and supplementary IVS selectors are valid.
+    /// Unsupported sequences resolve empty; nominal fallback is a new query.
+    required_variation_selector: ?u21 = null,
     /// Desired optical size in design units. The metadata index prefers a
     /// face whose `opsz` axis range contains this value.
     opsz: ?f32 = null,
     max_candidates: usize = 8,
+
+    pub fn validCoverage(self: Query) bool {
+        return @import("variation.zig").validCoverage(self.required_codepoint, self.required_variation_selector);
+    }
 };
 
 pub const Candidate = struct {

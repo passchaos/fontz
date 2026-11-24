@@ -1,0 +1,36 @@
+[traex-zig-guard 2026-11-25 04:52:45] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 04:53:15] started Zig tree root=66438 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-coverage-matching
++- run test 25 pass, 1 fail (26 total)
+error: 'variation_matching_tests.test.coverage matching variation sequence query cache isolates positive negative base selector and scalar' failed:
+       expected 4, found 5
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1024f796b in expectEqualInner__anon_38454 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x102590123 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:164:13: 0x1025901a7 in test.coverage matching variation sequence query cache isolates positive negative base selector and scalar (test)
+                   try std.testing.expectEqual(@as(u64, 4), discovery.stats().coverage_file_opens);
+                   ^
+failed command: ./.zig-cache/o/a4cea347c7ef980aa04907c5eaa3ff34/test --cache-dir=./.zig-cache --seed=0x66e87b86 --listen=-
+
+Build Summary: 12/14 steps succeeded (1 failed); 42/43 tests passed (1 failed)
+test-coverage-matching transitive failure
++- run test 25 pass, 1 fail (26 total)
+   +- compile test Debug native success 1s MaxRSS:351M
+test-variation-sequences success
++- run test 16 pass (16 total) 440ms MaxRSS:4M
+   +- compile test Debug native success 1s MaxRSS:333M
+test-variation-api success
++- run test 1 pass (1 total) 418ms MaxRSS:3M
+   +- compile test Debug native success 1s MaxRSS:328M
+check success
++- compile obj fontz-windows-check Debug x86_64-windows success 671ms MaxRSS:84M
++- compile obj fontz-macos-check Debug aarch64-macos success 671ms MaxRSS:84M
++- compile test Debug aarch64-linux success 578ms MaxRSS:138M
++- compile test Debug aarch64-macos success 553ms MaxRSS:135M
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/2981b5b815c36e53895b239729e039df/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/fontz-uvs-discovery-20261125 .zig-cache /Users/bytedance/.cache/zig --seed 0x66e87b86 -Z518a6875b5585c6a test-coverage-matching test-variation-sequences test-variation-api check -j1 --summary all
+[traex-zig-guard 2026-11-25 04:53:26] finished Zig tree root=66438 peak=514MiB result=0

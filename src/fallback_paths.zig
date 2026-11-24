@@ -42,6 +42,7 @@ pub fn forRoleCandidates(
 /// family returns an empty list so a missing authored font is not silently
 /// replaced by a UI font.
 pub fn forQuery(query: types.Query) []const CandidatePath {
+    if (!query.validCoverage()) return &.{};
     if (query.postscript_name != null) return &.{};
     var iterator = family_mod.FamilyIterator.init(query.family);
     var saw_concrete = false;

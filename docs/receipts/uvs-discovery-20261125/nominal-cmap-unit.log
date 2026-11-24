@@ -1,0 +1,9 @@
+[traex-zig-guard 2026-11-25 04:59:06] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 04:59:52] started Zig tree root=54441 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+src/metadata/cmap.zig:11:25: error: import of file outside module path
+const unicode = @import("../variation.zig");
+                        ^~~~~~~~~~~~~~~~~~
+src/metadata/cmap_variation.zig:3:25: error: import of file outside module path
+const unicode = @import("../variation.zig");
+                        ^~~~~~~~~~~~~~~~~~
+[traex-zig-guard 2026-11-25 04:59:53] finished Zig tree root=54441 peak=52MiB result=0

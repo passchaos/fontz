@@ -1,0 +1,35 @@
+[traex-zig-guard 2026-11-25 04:55:04] started Zig tree root=19272 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-coverage-matching
++- run test 26 pass, 1 fail (27 total)
+error: 'variation_matching_tests.test.coverage matching variation sequence default requires nominal and unsupported resolves empty' failed:
+       expected 187, found 4137
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x10276ba33 in expectEqualInner__anon_38454 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x102807417 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/fontz-uvs-discovery-20261125/src/variation_matching_tests.zig:86:5: 0x1028074fb in test.coverage matching variation sequence default requires nominal and unsupported resolves empty (test)
+           try std.testing.expectEqual(cold_bytes, discovery.stats().coverage_bytes_read);
+           ^
+failed command: ./.zig-cache/o/66886c42e665e6a8e213aed0dec5fe54/test --cache-dir=./.zig-cache --seed=0x34bd977e --listen=-
+
+Build Summary: 12/14 steps succeeded (1 failed); 44/45 tests passed (1 failed)
+test-coverage-matching transitive failure
++- run test 26 pass, 1 fail (27 total)
+   +- compile test Debug native success 2s MaxRSS:353M
+test-variation-sequences success
++- run test 17 pass (17 total) 419ms MaxRSS:4M
+   +- compile test Debug native success 1s MaxRSS:338M
+test-variation-api success
++- run test 1 pass (1 total) 401ms MaxRSS:3M
+   +- compile test Debug native success 1s MaxRSS:331M
+check success
++- compile obj fontz-windows-check Debug x86_64-windows success 523ms MaxRSS:84M
++- compile obj fontz-macos-check Debug aarch64-macos success 407ms MaxRSS:84M
++- compile test Debug aarch64-linux success 816ms MaxRSS:138M
++- compile test Debug aarch64-macos success 818ms MaxRSS:134M
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/2981b5b815c36e53895b239729e039df/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/fontz-uvs-discovery-20261125 .zig-cache /Users/bytedance/.cache/zig --seed 0x34bd977e -Ze72329f59bf2ba54 test-coverage-matching test-variation-sequences test-variation-api check -j1 --summary all
+[traex-zig-guard 2026-11-25 04:55:10] finished Zig tree root=19272 peak=495MiB result=0

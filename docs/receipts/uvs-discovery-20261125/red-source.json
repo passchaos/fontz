@@ -1,0 +1,9 @@
+{
+  "src/types.zig": "c5315d96bb668211b3c4de3425fa4d51a2175d062686621fc863700d43aa0284",
+  "src/coverage_matching_tests.zig": "eaa4828a62978e7d5e31aedbddccbfc6d0b57be87281eed43b1fc349cd3d1244",
+  "src/variation_matching_tests.zig": "3b674b9e7f23ed302e83018cdafa465e3ff63c4d5947a3fce4d6b5d5ce13ddf7",
+  "src/metadata/test_variation.zig": "32fb9869e0ec04aeb49124c263af8b46f1540041cc5d9441aa4a713480adf5f0",
+  "src/pure_discovery.zig": "cc471306dac3e3965e101c8017db0b6aa8c6f9136009e4dd43760e8a38ef949a",
+  "src/metadata/cmap.zig": "1d3085b2c298270cf42aab4347facb148b11c500eeb4b01ca6456a6d4a0792e5",
+  "src/root.zig": "58b49302f43860bd5ceabc98fcd2117c99bfb7d938e0be2a9f6f6257ed9dfc56"
+}

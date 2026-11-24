@@ -27,23 +27,41 @@ def run(command, cwd, log=False):
     return result.stdout.strip()
 
 
-def matching_test_counts(package, output):
-    names = re.findall(r'^test\s+"(coverage matching[^"\n]*)"',
-                       (package / "src/coverage_matching_tests.zig").read_text(), re.MULTILINE)
-    if not names:
-        raise RuntimeError("Exported package declares no coverage matching tests")
-    # The matching root also imports the metadata facade and coverage cache's
-    # two unnamed declaration checks. Checking the full count catches a build
-    # step accidentally rooted at src/root.zig, which only runs those checks.
-    unnamed = 2
+def named_tests(package, files, prefix):
+    names = []
+    for name in files:
+        names.extend(re.findall(r'^test\s+"(' + re.escape(prefix) + r'[^"\n]*)"',
+                                (package / name).read_text(), re.MULTILINE))
+    if not names or len(names) != len(set(names)):
+        raise RuntimeError("Missing or duplicate exported named tests for " + prefix)
+    return names
+
+
+def test_counts(package, output, build_step, files, prefix, unnamed):
+    names = named_tests(package, files, prefix)
     expected = len(names) + unnamed
     summary = re.search(r"Build Summary:[^\n]*; (\d+)/(\d+) tests passed", output)
     if not summary or tuple(map(int, summary.groups())) != (expected, expected):
-        raise RuntimeError("Exported coverage matching gate did not execute all " +
+        raise RuntimeError("Exported " + build_step + " did not execute all " +
                            str(len(names)) + " named and " + str(unnamed) + " unnamed tests")
-    return {"build_step": "test-coverage-matching", "named_test_count": len(names),
+    return {"build_step": build_step, "named_test_count": len(names),
             "unnamed_test_count": unnamed, "passed": expected, "total": expected,
             "named_tests": names}
+
+
+def matching_test_counts(package, output):
+    # Explicit named counts catch a gate accidentally rooted at src/root.zig,
+    # which can otherwise succeed after executing only declaration checks.
+    return test_counts(package, output, "test-coverage-matching",
+                       ["src/coverage_matching_tests.zig", "src/variation_matching_tests.zig"],
+                       "coverage matching", 2)
+
+
+def variation_test_counts(package, output):
+    return test_counts(package, output, "test-variation-sequences",
+                       ["src/root.zig", "src/metadata/variation_tests.zig",
+                        "src/metadata/variation_cache_tests.zig", "src/variation_fallback_tests.zig",
+                        "src/query_cache.zig"], "variation sequence", 3)
 
 
 def extract(archive, destination):
@@ -116,7 +134,7 @@ def verify(args):
                  "--global-cache-dir", str(work / "test-global-cache"),
                  "--test-filter", "face location", "--test-filter", "PostScript lookup",
                  "--test-filter", "TT collection", "--test-filter", "metadata cache",
-                 "--test-filter", "fvar"], package, log=True)
+                 "--test-filter", "fvar", "-j1"], package, log=True)
             gates.append("focused-metadata")
         if args.check:
             run(base + ["check", "-j1", "--summary", "all"], package, log=True)
@@ -128,6 +146,14 @@ def verify(args):
             output = run(base + ["test-coverage-matching", "-j1", "--summary", "all"], package, log=True)
             gate_results["catalog-coverage-matching"] = matching_test_counts(package, output)
             gates.append("catalog-coverage-matching")
+        if args.variation_sequence_tests:
+            output = run(base + ["test-variation-sequences", "-j1", "--summary", "all"], package, log=True)
+            gate_results["variation-sequences"] = variation_test_counts(package, output)
+            gates.append("variation-sequences")
+            output = run(base + ["test-variation-api", "-j1", "--summary", "all"], package, log=True)
+            gate_results["variation-api"] = test_counts(package, output, "test-variation-api",
+                ["tests/variation_api_test.zig"], "variation sequence published API", 0)
+            gates.append("variation-api")
         if args.macos_oracle:
             if sys.platform != "darwin":
                 raise RuntimeError("CoreText oracle requires a macOS host")
@@ -151,6 +177,7 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--concurrency-tests", action="store_true")
     parser.add_argument("--coverage-matching-tests", action="store_true")
+    parser.add_argument("--variation-sequence-tests", action="store_true")
     parser.add_argument("--macos-oracle", action="store_true")
     args = parser.parse_args()
     try:
