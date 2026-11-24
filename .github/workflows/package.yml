@@ -19,7 +19,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Verify published package and platform declarations
-        run: python3 tools/verify_package_export.py --configure --metadata-tests --check --report package-export.json
+        run: python3 tools/verify_package_export.py --configure --metadata-tests --check --concurrency-tests --report package-export.json
       - name: Verify exported macOS CoreText oracle
         if: runner.os == 'macOS'
         run: python3 tools/verify_package_export.py --macos-oracle --report package-coretext.json

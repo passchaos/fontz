@@ -95,6 +95,9 @@ def verify(args):
         if args.check:
             run(base + ["check", "-j1", "--summary", "all"], package)
             gates.append("platform-declarations")
+        if args.concurrency_tests:
+            run(base + ["test-concurrency", "-j1", "--summary", "all"], package)
+            gates.append("catalog-concurrency")
         if args.macos_oracle:
             if sys.platform != "darwin":
                 raise RuntimeError("CoreText oracle requires a macOS host")
@@ -116,6 +119,7 @@ def main():
     parser.add_argument("--configure", action="store_true")
     parser.add_argument("--metadata-tests", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--concurrency-tests", action="store_true")
     parser.add_argument("--macos-oracle", action="store_true")
     args = parser.parse_args()
     try:

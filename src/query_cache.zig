@@ -5,6 +5,12 @@ const types = @import("types.zig");
 
 const max_entries = 32;
 
+/// An owned miss and the catalog epoch used to produce it.
+pub const EpochResolution = struct {
+    resolution: types.Resolution,
+    index_generation: u64,
+};
+
 const Key = struct {
     allocator: std.mem.Allocator,
     family: []u8,
@@ -88,28 +94,26 @@ pub const Cache = struct {
         return .{ .allocator = allocator };
     }
 
-    /// Shared provider resolve path: lock, check the cache, build a miss
-    /// outside the cache, then install a reference-counted entry.
+    /// The owner mutex must be held before reading either generation and for
+    /// the whole call. Exact hits only retain their owned candidate storage.
     pub fn resolveCached(
         cache: *Cache,
-        mutex: *std.Io.Mutex,
         allocator: std.mem.Allocator,
         generation: u64,
         index_generation: u64,
         query: types.Query,
         owner: anytype,
     ) !types.Resolution {
-        mutex.lockUncancelable(std.Options.debug_io);
-        defer mutex.unlock(std.Options.debug_io);
         if (try cache.get(query, generation, index_generation, allocator)) |hit| return hit;
-        var resolution = try owner.resolveUncached(owner.allocator, query);
+        const resolved = try owner.resolveUncachedLocked(owner.allocator, query);
+        var resolution = resolved.resolution;
         var shared = resolution.intoShared() catch |err| {
             resolution.deinit();
             return err;
         };
         errdefer shared.deinit();
         var cache_ref = shared.retain();
-        cache.put(query, generation, index_generation, cache_ref) catch |err| {
+        cache.put(query, generation, resolved.index_generation, cache_ref) catch |err| {
             cache_ref.deinit();
             return err;
         };

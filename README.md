@@ -97,6 +97,18 @@ Resolutions returned by the provider cache are reference-counted: cache hits
 retain the cached candidates instead of cloning every string. `deinit` always
 releases the caller's reference.
 
+Operations on one `Discovery` serialize with refresh, including prewarm and
+family enumeration. Each catalog reader holds an immutable snapshot until its
+face metadata has been copied. Reset detaches the global snapshot immediately;
+the final reader frees it. A miss that overlaps reset retains its actual catalog
+epoch, so the next query rebuilds. Exact cache hits remain allocation and IO
+free. Retained resolutions survive refresh/reset and owner destruction, and
+their independent references may be released from different threads.
+
+Join all operations before `Discovery.deinit`. An allocator shared by separate
+discovery owners must support concurrent use or be serialized by the caller;
+keep it alive until the last retained resolution is released.
+
 Coverage storage has an independent lifetime: clearing or evicting a cmap
 table cannot invalidate a retained `Resolution`. `refresh` clears both caches;
 an external `metadata_index.reset` invalidates them through the index
@@ -156,8 +168,15 @@ PostScript locations and the version-3 disk cache preserve those original
 indexes.
 
 The process-wide index is bounded by file/face/table budgets and is built
-outside its global mutex. Call `metadata_index.reset(io)` to change roots or
-budgets; do not hold `Face` pointers across it.
+outside its global mutex, with cold builds serialized separately. Call
+`metadata_index.reset(io)` to change roots or budgets; the first successful
+build after reset fixes the process-wide `Options`. Raw borrowed `Face` APIs
+require callers to quiesce reset while using their pointers. Direct readers
+that need to overlap reset can use `metadata_index.acquireRead(io, options)`
+and keep its `ReadLease` alive through lookup/copying.
+
+`zig build test-concurrency` runs the deterministic native lifecycle, epoch,
+exclusive-cache-writer, retained-resolution, and allocation-failure regressions.
 
 ## Boundary
 
@@ -186,7 +205,7 @@ Verify the actual exported archive and its literal build inputs:
 python3 tools/verify_package_export.py --report zig-out/package-export.json
 ```
 
-Optional `--configure --metadata-tests --check` runs the focused package gates
+Optional `--configure --metadata-tests --check --concurrency-tests` runs the focused package gates
 from the exported tree with isolated caches. `--macos-oracle` runs CoreText
 matching on macOS. The package workflow runs these gates on Linux and macOS;
 a local success does not imply the hosted workflow has already completed.

@@ -13,6 +13,11 @@ const metadata_index = @import("metadata_index.zig");
 const fontconfig = @import("metadata/fontconfig.zig");
 const coverage_cache = @import("metadata/coverage_cache.zig");
 const query_cache = @import("query_cache.zig");
+const concurrency_hooks = @import("concurrency_hooks.zig");
+
+comptime {
+    _ = @import("concurrency_tests.zig");
+}
 
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
@@ -64,6 +69,7 @@ pub const Discovery = struct {
         };
     }
 
+    /// Callers must join/quiesce all operations before destroying the owner.
     pub fn deinit(self: *Discovery) void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         self.config.deinit();
@@ -82,9 +88,10 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: types.Query,
     ) !types.Resolution {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         return try query_cache.Cache.resolveCached(
             &self.cache,
-            &self.mutex,
             allocator,
             self.generation_value,
             metadata_index.generation(),
@@ -95,6 +102,10 @@ pub const Discovery = struct {
 
     pub fn refresh(self: *Discovery) !bool {
         const io = std.Options.debug_io;
+        concurrency_hooks.fire(.refresh_waiting, 0);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        concurrency_hooks.fire(.refresh_locked, 0);
         var new_config = fontconfig.load(io, self.allocator) catch return false;
         errdefer new_config.deinit();
         const arena = new_config.arena.allocator();
@@ -104,8 +115,6 @@ pub const Discovery = struct {
             metadata_index.defaultRoots(io, arena) catch &.{};
         const mappings = try buildGenericMappings(arena, new_config.aliases);
 
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
         self.config.deinit();
         self.config = new_config;
         self.roots = roots;
@@ -141,10 +150,13 @@ pub const Discovery = struct {
     }
 
     /// Builds the metadata index ahead of the first query. Safe to call from a
-    /// background worker; resolution and prewarm serialize on the process-wide
-    /// index mutex.
+    /// background worker. Owner configuration reads serialize with refresh;
+    /// cold catalog builds serialize across owners.
     pub fn prewarm(self: *Discovery) bool {
         const io = std.Options.debug_io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        concurrency_hooks.fire(.owner_read, 0);
         return metadata_index.prewarm(io, .{
             .roots = self.roots,
             .generic_mappings = self.generic_mappings,
@@ -155,6 +167,9 @@ pub const Discovery = struct {
         self: *Discovery,
         allocator: std.mem.Allocator,
     ) ![]const []const u8 {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        concurrency_hooks.fire(.owner_read, 0);
         return metadata_index.familyNames(std.Options.debug_io, allocator, .{
             .roots = self.roots,
             .generic_mappings = self.generic_mappings,
@@ -166,17 +181,34 @@ pub const Discovery = struct {
         allocator: std.mem.Allocator,
         query: types.Query,
     ) !types.Resolution {
-        if (query.max_candidates == 0) return try emptyResolution(allocator);
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        return (try self.resolveUncachedLocked(allocator, query)).resolution;
+    }
+
+    /// Internal cache callback. The caller must hold this owner's mutex.
+    pub fn resolveUncachedLocked(
+        self: *Discovery,
+        allocator: std.mem.Allocator,
+        query: types.Query,
+    ) !query_cache.EpochResolution {
+        if (query.max_candidates == 0) return .{
+            .resolution = try emptyResolution(allocator),
+            .index_generation = metadata_index.generation(),
+        };
         const io = std.Options.debug_io;
         const options = metadata_index.Options{
             .roots = self.roots,
             .generic_mappings = self.generic_mappings,
         };
         const hinted = hintQuery(query);
-        var face = metadata_index.findFace(io, hinted, options);
+        var lease = metadata_index.acquireRead(io, options);
+        defer lease.deinit();
+        var face = lease.findFace(hinted, options);
+        concurrency_hooks.fire(.face_selected, lease.epoch);
         if (face) |selected| {
             if (query.required_codepoint) |codepoint| {
-                if (!(self.coverage.coversCodepoint(io, selected.path, selected.face_index, codepoint, metadata_index.generation()) catch false)) {
+                if (!(self.coverage.coversCodepoint(io, selected.path, selected.face_index, codepoint, lease.epoch) catch false)) {
                     face = null;
                 }
             }
@@ -204,7 +236,10 @@ pub const Discovery = struct {
                 selected.style,
                 selected.monospaced,
             );
-            try candidates.append(allocator, candidate);
+            candidates.append(allocator, candidate) catch |err| {
+                candidate.deinit();
+                return err;
+            };
         }
 
         const family_hint = firstFamily(query.family);
@@ -212,7 +247,7 @@ pub const Discovery = struct {
             if (candidates.items.len >= query.max_candidates) break;
             if (!pathExists(fallback.path)) continue;
             if (query.required_codepoint) |codepoint| {
-                if (!(self.coverage.coversCodepoint(io, fallback.path, fallback.face_index, codepoint, metadata_index.generation()) catch false)) continue;
+                if (!(self.coverage.coversCodepoint(io, fallback.path, fallback.face_index, codepoint, lease.epoch) catch false)) continue;
             }
             if (containsCandidate(candidates.items, fallback.path, fallback.face_index)) continue;
             var candidate = try types.Candidate.init(
@@ -231,13 +266,19 @@ pub const Discovery = struct {
                 query.style,
                 false,
             );
-            try candidates.append(allocator, candidate);
+            candidates.append(allocator, candidate) catch |err| {
+                candidate.deinit();
+                return err;
+            };
         }
 
         return .{
-            .allocator = allocator,
-            .candidates = try candidates.toOwnedSlice(allocator),
-            .provider = .metadata_index,
+            .resolution = .{
+                .allocator = allocator,
+                .candidates = try candidates.toOwnedSlice(allocator),
+                .provider = .metadata_index,
+            },
+            .index_generation = lease.epoch,
         };
     }
 };
@@ -589,6 +630,8 @@ test "pure provider resolves synthetic roots and generic families" {
 
     var discovery = try Discovery.initWithRoots(std.testing.allocator, &roots);
     defer discovery.deinit();
+    // Keep the synthetic fixture independent of platform default family stacks.
+    discovery.generic_mappings = &.{.{ .generic = .sans_serif, .families = &.{"DejaVu Sans"} }};
     var resolution = try discovery.resolve(std.testing.allocator, .{
         .family = "sans-serif",
         .weight = 700,
@@ -596,6 +639,7 @@ test "pure provider resolves synthetic roots and generic families" {
     defer resolution.deinit();
     try std.testing.expect(resolution.candidates.len > 0);
     try std.testing.expectEqual(types.Provider.metadata_index, resolution.provider);
+    try std.testing.expectEqual(types.Provider.metadata_index, resolution.candidates[0].provider);
     try std.testing.expectEqualStrings("DejaVu Sans", resolution.candidates[0].family.?);
     try std.testing.expectEqual(@as(u16, 700), resolution.candidates[0].weight);
 }

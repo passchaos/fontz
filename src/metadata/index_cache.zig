@@ -3,10 +3,12 @@
 //! The cache stores only parsed metadata (never font bytes) and is validated
 //! against the current root list plus every font file's path, size, and mtime.
 //! A mismatch or any malformed cache byte falls back to a fresh scan. Writes
-//! are atomic: a sibling `.tmp` file is renamed over the target.
+//! are atomic: each writer exclusively creates a unique sibling temporary file
+//! and closes it before renaming it over the target.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const concurrency_hooks = @import("../concurrency_hooks.zig");
 
 pub const magic = "FNTZIDX1";
 // Version 3 invalidates metadata written before original TTC indexes survived
@@ -41,14 +43,28 @@ pub fn store(
 
     const dir_path = std.fs.path.dirname(cache_path) orelse return;
     std.Io.Dir.cwd().createDirPath(io, dir_path) catch return;
-    const tmp_path = std.fmt.allocPrint(allocator, "{s}.tmp", .{cache_path}) catch return;
-    defer allocator.free(tmp_path);
-
-    var file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{}) catch return;
-    defer file.close(io);
-    file.writeStreamingAll(io, buffer.items) catch return;
-    file.sync(io) catch {};
-    std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch return;
+    // A process-local build mutex cannot protect writers in other processes.
+    // Exclusive creation also makes a nonce collision safe: retry a fresh name.
+    for (0..8) |_| {
+        var nonce: [16]u8 = undefined;
+        io.random(&nonce);
+        const tmp_path = std.fmt.allocPrint(allocator, "{s}.tmp-{x}", .{ cache_path, std.mem.readInt(u128, &nonce, .little) }) catch return;
+        defer allocator.free(tmp_path);
+        var file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return,
+        };
+        defer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
+        var open = true;
+        defer if (open) file.close(io);
+        concurrency_hooks.fire(.cache_temp_created, 0);
+        file.writeStreamingAll(io, buffer.items) catch return;
+        file.sync(io) catch {};
+        file.close(io);
+        open = false;
+        std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch return;
+        return;
+    }
 }
 
 /// Load a validated cache. Returns null for missing, stale, or malformed

@@ -135,7 +135,12 @@ codepoints are significant, so `宋体` never matches `黑体`.
 
 The process-wide index:
 
-- is built outside the global mutex;
+- publishes immutable heap snapshots under the global mutex, with one global
+  reference and one reference per read lease;
+- serializes cold builds with a separate build mutex. Reset only takes the
+  global mutex, detaches the old snapshot, and atomically advances the epoch;
+- discards a build if reset changed its epoch before publication. Only accepted
+  builds update the atomic disk-cache diagnostic;
 - uses a persistent arena for decoded metadata and a per-file scratch arena for
   raw table bytes;
 - is bounded by file, face, per-name-table and total metadata budgets;
@@ -144,6 +149,32 @@ The process-wide index:
 - follows symlinked font files while walking roots;
 - keeps `Options` fixed after the first successful build. Call `reset` to
   change roots or budgets; callers must not hold `Face` pointers across it.
+
+`metadata_index.acquireRead` returns a `ReadLease`. Its face pointers and family
+name storage survive reset until `ReadLease.deinit` releases the last reference.
+High-level resolution holds a lease through matching, coverage, and candidate
+copying; family enumeration holds one through all string copies. The historical
+raw `findFace`, `findFamily`, and `findByPostScript` APIs still return borrowed
+pointers: their callers must quiesce reset through lookup and subsequent use.
+
+Each `Discovery` serializes resolve, prewarm, enumeration, coverage, stats, and
+the entire refresh configuration preparation/swap with its owner mutex. Refresh
+cannot reclaim roots or mappings while another operation reads them. Destruction
+still requires callers to quiesce and join operations before `Discovery.deinit`.
+Allocators shared across separate owners must support concurrent use, or callers
+must serialize those owners themselves.
+
+Query hits only retain owned resolutions and read the atomic global epoch while
+holding the owner mutex. They require no catalog lease, allocation, or font IO.
+Miss entries and coverage proofs use the epoch of the actual read lease. A reset
+may overlap an in-flight miss and that caller can receive an owned old-snapshot
+result; the next query observes the newer epoch and rebuilds instead of hitting
+that entry. No old metadata is tagged with a newer reset epoch.
+
+Disk writers exclusively create a unique nonce-named sibling temporary file,
+close it before rename, and remove only their own temporary file on failure.
+Concurrent writers may replace each other's completed cache, but cannot share
+or truncate a temporary file. File-record format version 3 is unchanged.
 
 `findFamily` keeps the historical width-class (1..9) parameter for
 compatibility. New code should use `findFace` and pass a CSS `stretch`.
@@ -168,6 +199,10 @@ the cached candidates instead of cloning every path/family/PostScript string.
 `Resolution.deinit` releases one reference; the last release frees the
 candidate block. Non-shared resolutions (fallback, tests, direct metadata-index
 callers) keep the original owned semantics.
+
+Retained resolutions own their candidate strings and survive refresh, catalog
+reset, and owner destruction. Independent references may be released on separate
+threads; allocator lifetime must cover the final release.
 
 ## Missing glyphs
 
@@ -234,3 +269,6 @@ The published package includes `tests/` so macOS consumers can run
 `zig build test-macos-coretext` after `zig fetch`. CoreText/CoreFoundation are
 linked only by this native differential test; the production provider remains
 pure Zig and links no native font libraries.
+
+See [catalog-snapshots.md](catalog-snapshots.md) for snapshot ownership, scoped
+qualification and the allocation-free hot-query control.

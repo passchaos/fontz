@@ -17,6 +17,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run fontz tests");
     test_step.dependOn(&run_tests.step);
 
+    const concurrency_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/concurrency_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{ "catalog concurrency", "catalog OOM" },
+    });
+    const run_concurrency_tests = b.addRunArtifact(concurrency_tests);
+    const concurrency_step = b.step("test-concurrency", "Run catalog lifecycle, cache epoch, and OOM regressions");
+    concurrency_step.dependOn(&run_concurrency_tests.step);
+    test_step.dependOn(&run_concurrency_tests.step);
+
     if (target.result.os.tag == .macos) {
         const coretext_tests = b.addTest(.{
             .root_module = b.createModule(.{

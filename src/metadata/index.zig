@@ -19,6 +19,8 @@ const parse = @import("parse.zig");
 const env = @import("../env.zig");
 const test_font = @import("test_font.zig");
 const metadata_cache = @import("index_cache.zig");
+const snapshot_mod = @import("snapshot.zig");
+const concurrency_hooks = @import("../concurrency_hooks.zig");
 
 comptime {
     _ = @import("face_location_tests.zig");
@@ -97,16 +99,66 @@ const Index = struct {
     postscript_index: std.StringHashMapUnmanaged(u32),
     /// Sorted, unique primary family names.
     family_names: []const []const u8,
+
+    pub fn deinit(self: *Index) void {
+        self.arena.deinit();
+    }
 };
 
+const CatalogSnapshot = snapshot_mod.Snapshot(Index);
 var index_mutex: std.Io.Mutex = .init;
-var index_cache: ?Index = null;
+// Never acquire build_mutex while holding index_mutex. Reset does not need the
+// build mutex and can detach a catalog while a cold scan is in progress.
+var build_mutex: std.Io.Mutex = .init;
+var index_cache: ?*CatalogSnapshot = null;
 /// Whether the most recent successful index build came from the disk cache.
 /// Diagnostics/tests only; not a synchronization primitive.
-var last_index_from_cache: bool = false;
+var last_index_from_cache = std.atomic.Value(bool).init(false);
 /// Bumped whenever the process-wide index is dropped; query caches include it
 /// so an external font-change reset invalidates cached resolutions.
-var index_generation: u64 = 1;
+var index_generation = std.atomic.Value(u64).init(1);
+
+/// Owns a read reference until deinit. Selected faces and family names remain
+/// valid across reset for this lease's lifetime. Do not copy a lease value.
+pub const ReadLease = struct {
+    snapshot: ?*CatalogSnapshot,
+    epoch: u64,
+
+    pub fn deinit(self: *ReadLease) void {
+        if (self.snapshot) |snapshot| snapshot.release();
+        self.* = undefined;
+    }
+
+    pub fn available(self: ReadLease) bool {
+        return self.snapshot != null;
+    }
+
+    pub fn findFace(self: ReadLease, query: types.Query, options: Options) ?*const Face {
+        const snapshot = self.snapshot orelse return null;
+        return findFaceInIndex(&snapshot.payload, query, options);
+    }
+
+    pub fn findByPostScript(self: ReadLease, name: []const u8) ?*const Face {
+        const snapshot = self.snapshot orelse return null;
+        return findByPostScriptIndex(&snapshot.payload, name);
+    }
+
+    pub fn familyNames(self: ReadLease, allocator: std.mem.Allocator) ![]const []const u8 {
+        const snapshot = self.snapshot orelse return try allocator.alloc([]const u8, 0);
+        const index = &snapshot.payload;
+        const names = try allocator.alloc([]const u8, index.family_names.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (names[0..initialized]) |name| allocator.free(name);
+            allocator.free(names);
+        }
+        for (index.family_names, names) |name, *out| {
+            out.* = try allocator.dupe(u8, name);
+            initialized += 1;
+        }
+        return names;
+    }
+};
 
 /// Reset the process-wide index. Tests only; the production cache lives for the
 /// process lifetime. Callers must not hold `Face` pointers across this call.
@@ -118,12 +170,14 @@ pub fn resetForTesting(io: std.Io) void {
 /// call this from a background worker at startup so the first text layout does
 /// not pay the cold scan. Returns false when the index could not be built.
 pub fn prewarm(io: std.Io, options: Options) bool {
-    return ensureIndex(io, options) != null;
+    var lease = acquireRead(io, options);
+    defer lease.deinit();
+    return lease.available();
 }
 
 /// Whether the most recent build reused the persistent metadata cache.
 pub fn lastBuildUsedCache() bool {
-    return last_index_from_cache;
+    return last_index_from_cache.load(.acquire);
 }
 
 /// Explicitly drop the process-wide index. Callers must not hold `Face`
@@ -131,16 +185,18 @@ pub fn lastBuildUsedCache() bool {
 /// index build; use this to switch roots/budgets in tests or embedders.
 pub fn reset(io: std.Io) void {
     index_mutex.lockUncancelable(io);
-    defer index_mutex.unlock(io);
-    if (index_cache) |*cached| cached.arena.deinit();
+    const detached = index_cache;
     index_cache = null;
-    index_generation +%= 1;
-    if (index_generation == 0) index_generation = 1;
+    var next = index_generation.load(.monotonic) +% 1;
+    if (next == 0) next = 1;
+    index_generation.store(next, .release);
+    index_mutex.unlock(io);
+    if (detached) |snapshot| snapshot.release();
 }
 
 /// Current process-wide index generation.
 pub fn generation() u64 {
-    return index_generation;
+    return index_generation.load(.acquire);
 }
 
 /// Find the best installed face for an authored CSS family list.
@@ -175,7 +231,12 @@ pub fn findFamily(
 /// here: this index intentionally does not parse `cmap`. Native providers or
 /// Cangjie remain responsible for coverage proof.
 pub fn findFace(io: std.Io, query: types.Query, options: Options) ?*const Face {
-    const index = ensureIndex(io, options) orelse return null;
+    var lease = acquireRead(io, options);
+    defer lease.deinit();
+    return lease.findFace(query, options);
+}
+
+fn findFaceInIndex(index: *const Index, query: types.Query, options: Options) ?*const Face {
     if (query.postscript_name) |requested| {
         if (findByPostScriptIndex(index, requested)) |face| return face;
     }
@@ -203,8 +264,9 @@ pub fn findByPostScript(
     postscript_name: []const u8,
     options: Options,
 ) ?*const Face {
-    const index = ensureIndex(io, options) orelse return null;
-    return findByPostScriptIndex(index, postscript_name);
+    var lease = acquireRead(io, options);
+    defer lease.deinit();
+    return lease.findByPostScript(postscript_name);
 }
 
 /// Sorted, unique primary family names. Localized names still participate in
@@ -215,18 +277,9 @@ pub fn familyNames(
     allocator: std.mem.Allocator,
     options: Options,
 ) ![]const []const u8 {
-    const index = ensureIndex(io, options) orelse return try allocator.alloc([]const u8, 0);
-    const names = try allocator.alloc([]const u8, index.family_names.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (names[0..initialized]) |name| allocator.free(name);
-        allocator.free(names);
-    }
-    for (index.family_names, names) |name, *out| {
-        out.* = try allocator.dupe(u8, name);
-        initialized += 1;
-    }
-    return names;
+    var lease = acquireRead(io, options);
+    defer lease.deinit();
+    return lease.familyNames(allocator);
 }
 
 pub const allFamilyNames = familyNames;
@@ -489,30 +542,68 @@ fn matchingWeight(
     return below;
 }
 
-fn ensureIndex(io: std.Io, options: Options) ?*const Index {
+/// Acquire a stable catalog view. Failed builds also report the epoch actually
+/// attempted, so an owned negative result cannot be stamped with a later reset.
+pub fn acquireRead(io: std.Io, options: Options) ReadLease {
     index_mutex.lockUncancelable(io);
-    if (index_cache != null) {
-        const cached = &index_cache.?;
+    if (index_cache) |cached| {
+        cached.retain();
         index_mutex.unlock(io);
-        return cached;
+        return .{ .snapshot = cached, .epoch = cached.epoch };
     }
     index_mutex.unlock(io);
 
-    var built = buildIndex(io, options) catch return null;
+    concurrency_hooks.fire(.build_waiting, 0);
+    build_mutex.lockUncancelable(io);
+    defer build_mutex.unlock(io);
+    while (true) {
+        index_mutex.lockUncancelable(io);
+        if (index_cache) |cached| {
+            cached.retain();
+            index_mutex.unlock(io);
+            return .{ .snapshot = cached, .epoch = cached.epoch };
+        }
+        const epoch = generation();
+        index_mutex.unlock(io);
 
-    index_mutex.lockUncancelable(io);
-    if (index_cache == null) {
-        index_cache = built;
-    } else {
-        built.arena.deinit();
+        var built = buildIndex(io, options) catch return .{ .snapshot = null, .epoch = epoch };
+        const snapshot_allocator = if (builtin.is_test)
+            concurrency_hooks.snapshot_allocator orelse std.heap.page_allocator
+        else
+            std.heap.page_allocator;
+        const snapshot = CatalogSnapshot.create(snapshot_allocator, built.index, epoch, built.from_cache) catch {
+            built.index.deinit();
+            return .{ .snapshot = null, .epoch = epoch };
+        };
+        if (builtin.is_test) snapshot.on_destroy = snapshotDestroyed;
+        concurrency_hooks.fire(.before_publish, epoch);
+
+        index_mutex.lockUncancelable(io);
+        if (generation() != epoch) {
+            index_mutex.unlock(io);
+            snapshot.release();
+            continue;
+        }
+        index_cache = snapshot;
+        last_index_from_cache.store(snapshot.from_cache, .release);
+        snapshot.retain();
+        index_mutex.unlock(io);
+        return .{ .snapshot = snapshot, .epoch = epoch };
     }
-    const cached = if (index_cache) |*value| value else null;
-    index_mutex.unlock(io);
-    return cached;
 }
 
-fn buildIndex(io: std.Io, options: Options) !Index {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+fn snapshotDestroyed(epoch: u64) void {
+    concurrency_hooks.fire(.snapshot_destroyed, epoch);
+}
+
+const BuiltIndex = struct { index: Index, from_cache: bool };
+
+fn buildIndex(io: std.Io, options: Options) !BuiltIndex {
+    const persistent_allocator = if (builtin.is_test)
+        concurrency_hooks.persistent_allocator orelse std.heap.page_allocator
+    else
+        std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(persistent_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
@@ -520,7 +611,6 @@ fn buildIndex(io: std.Io, options: Options) !Index {
     const stamps = try collectFileStamps(io, allocator, roots, options);
     const limits_hash = optionsLimitsHash(options);
     const cache_path = resolveCachePath(allocator, options);
-    last_index_from_cache = false;
     if (cache_path) |path| {
         if (try metadata_cache.load(
             Face,
@@ -531,8 +621,7 @@ fn buildIndex(io: std.Io, options: Options) !Index {
             stamps,
             limits_hash,
         )) |faces| {
-            last_index_from_cache = true;
-            return try finishIndex(&arena, faces);
+            return .{ .index = try finishIndex(&arena, faces), .from_cache = true };
         }
     }
 
@@ -618,7 +707,7 @@ fn buildIndex(io: std.Io, options: Options) !Index {
             limits_hash,
         );
     }
-    return try finishIndex(&arena, owned_faces);
+    return .{ .index = try finishIndex(&arena, owned_faces), .from_cache = false };
 }
 
 fn finishIndex(arena: *std.heap.ArenaAllocator, owned_faces: []const Face) !Index {
