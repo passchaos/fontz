@@ -12,6 +12,7 @@ const fallback_paths = @import("fallback_paths.zig");
 const metadata_index = @import("metadata_index.zig");
 const fontconfig = @import("metadata/fontconfig.zig");
 const coverage_cache = @import("metadata/coverage_cache.zig");
+const coverage_filter = @import("metadata/coverage_filter.zig");
 const query_cache = @import("query_cache.zig");
 const concurrency_hooks = @import("concurrency_hooks.zig");
 
@@ -204,15 +205,20 @@ pub const Discovery = struct {
         const hinted = hintQuery(query);
         var lease = metadata_index.acquireRead(io, options);
         defer lease.deinit();
-        var face = lease.findFace(hinted, options);
+        const face = if (query.required_codepoint) |codepoint| blk: {
+            const filter = coverage_filter.Filter{
+                .cache = &self.coverage,
+                .io = io,
+                .codepoint = codepoint,
+                .epoch = lease.epoch,
+            };
+            // Script hints must not discard the authored family list or user
+            // generic mappings. Try them only after the full stack lacks proof.
+            if (try lease.findFaceFiltered(allocator, query, options, &filter)) |selected| break :blk selected;
+            if (query.postscript_name != null or std.mem.eql(u8, query.family, hinted.family)) break :blk null;
+            break :blk try lease.findFaceFiltered(allocator, hinted, options, &filter);
+        } else lease.findFace(hinted, options);
         concurrency_hooks.fire(.face_selected, lease.epoch);
-        if (face) |selected| {
-            if (query.required_codepoint) |codepoint| {
-                if (!(self.coverage.coversCodepoint(io, selected.path, selected.face_index, codepoint, lease.epoch) catch false)) {
-                    face = null;
-                }
-            }
-        }
 
         var candidates: std.ArrayList(types.Candidate) = .empty;
         errdefer {

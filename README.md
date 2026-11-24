@@ -117,6 +117,26 @@ reset. Malformed/missing cmap tables cache a structural negative within the
 snapshot; IO and table-allocation failures remain retryable. Cache-installation
 allocation failures preserve the successfully computed coverage result.
 
+With `required_codepoint`, catalog matching first checks the CSS best face for
+coverage. If it misses, matching screens the remaining family faces and applies
+CSS stretch, style, weight, and optical-size ranking to the covered set.
+If no face covers the codepoint, it continues through the authored
+family list or generic mapping's next concrete family, including fonts in
+user-supplied roots. A PostScript query checks only its exact face. Queries
+without a codepoint keep their existing metadata-only choice. The provider
+still chooses one best catalog face; `max_candidates` semantics are unchanged.
+Script hints are tried after the authored stack, so CJK hints cannot replace
+user generic mappings or a later authored family. If a CSS-matched set has no
+optical-size metadata, an `opsz` request retains its first face; faces with
+optical-size ranges continue to rank ahead of static faces.
+
+When the best face covers the codepoint, only its cmap is read. Otherwise,
+coverage matching can read additional cmap tables on a first miss, and reuses
+the existing table cache across later descriptors and named instances. Catalog
+screening and candidate copies retain the same read lease and epoch. Allocation
+failures during screening propagate as `OutOfMemory`, allowing a later query to
+retry without a cached negative. Exact query hits remain allocation and IO free.
+
 `Discovery.stats()` includes cumulative `coverage_cache_hits`,
 `coverage_cache_misses`, `coverage_file_opens`, `coverage_read_calls`, and
 `coverage_bytes_read`, plus current `coverage_cache_entries` and
@@ -178,6 +198,12 @@ and keep its `ReadLease` alive through lookup/copying.
 `zig build test-concurrency` runs the deterministic native lifecycle, epoch,
 exclusive-cache-writer, retained-resolution, and allocation-failure regressions.
 
+`zig build test-coverage-matching` runs synthetic cmap/TTC regressions for
+covering sibling faces, subsequent families/generic mappings, CSS ranking,
+PostScript identity, lease epochs, refresh, allocation failures, and query hits.
+The [qualification record](docs/benchmarks/coverage-aware-matching.md) includes
+strict red/green evidence, owner checks, and allocation/IO controls.
+
 ## Boundary
 
 `fontz` must not depend on Cangjie, Zui, Zsvg, Pdfz, or Iris. Consumers install
@@ -205,7 +231,10 @@ Verify the actual exported archive and its literal build inputs:
 python3 tools/verify_package_export.py --report zig-out/package-export.json
 ```
 
-Optional `--configure --metadata-tests --check --concurrency-tests` runs the focused package gates
-from the exported tree with isolated caches. `--macos-oracle` runs CoreText
-matching on macOS. The package workflow runs these gates on Linux and macOS;
-a local success does not imply the hosted workflow has already completed.
+Optional `--configure --metadata-tests --check --concurrency-tests
+--coverage-matching-tests` runs the focused package gates from the exported tree
+with isolated caches. Matching verification checks the actual execution count
+against the exported named tests and includes those counts in the JSON report.
+`--macos-oracle` runs CoreText matching on macOS. The package workflow runs these
+gates on Linux and macOS; a local success does not imply the hosted workflow has
+already completed.

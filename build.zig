@@ -30,6 +30,19 @@ pub fn build(b: *std.Build) void {
     concurrency_step.dependOn(&run_concurrency_tests.step);
     test_step.dependOn(&run_concurrency_tests.step);
 
+    const coverage_matching_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/coverage_matching_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"coverage matching"},
+    });
+    const run_coverage_matching_tests = b.addRunArtifact(coverage_matching_tests);
+    const coverage_matching_step = b.step("test-coverage-matching", "Run coverage-aware catalog matching regressions");
+    coverage_matching_step.dependOn(&run_coverage_matching_tests.step);
+    test_step.dependOn(&run_coverage_matching_tests.step);
+
     if (target.result.os.tag == .macos) {
         const coretext_tests = b.addTest(.{
             .root_module = b.createModule(.{

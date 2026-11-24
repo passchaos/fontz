@@ -14,11 +14,36 @@ import tempfile
 FORBIDDEN = {".git", ".zig-cache", "zig-out", "zig-pkg", "__pycache__", ".DS_Store"}
 
 
-def run(command, cwd):
+def run(command, cwd, log=False):
+    if log:
+        print("run from exported package:", " ".join(command), "cwd:", cwd, flush=True)
     result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError("Command failed: " + " ".join(command) + "\n" + result.stdout + result.stderr)
+    if log:
+        print(result.stdout, end="", flush=True)
+        print(result.stderr, end="", file=sys.stderr, flush=True)
+        return (result.stdout + result.stderr).strip()
     return result.stdout.strip()
+
+
+def matching_test_counts(package, output):
+    names = re.findall(r'^test\s+"(coverage matching[^"\n]*)"',
+                       (package / "src/coverage_matching_tests.zig").read_text(), re.MULTILINE)
+    if not names:
+        raise RuntimeError("Exported package declares no coverage matching tests")
+    # The matching root also imports the metadata facade and coverage cache's
+    # two unnamed declaration checks. Checking the full count catches a build
+    # step accidentally rooted at src/root.zig, which only runs those checks.
+    unnamed = 2
+    expected = len(names) + unnamed
+    summary = re.search(r"Build Summary:[^\n]*; (\d+)/(\d+) tests passed", output)
+    if not summary or tuple(map(int, summary.groups())) != (expected, expected):
+        raise RuntimeError("Exported coverage matching gate did not execute all " +
+                           str(len(names)) + " named and " + str(unnamed) + " unnamed tests")
+    return {"build_step": "test-coverage-matching", "named_test_count": len(names),
+            "unnamed_test_count": unnamed, "passed": expected, "total": expected,
+            "named_tests": names}
 
 
 def extract(archive, destination):
@@ -80,33 +105,38 @@ def verify(args):
         if missing:
             raise RuntimeError("Missing published build input: " + ", ".join(missing))
         gates = []
+        gate_results = {}
         base = [args.zig, "build", "--cache-dir", str(work / "build-cache"),
                 "--global-cache-dir", str(work / "build-global-cache")]
         if args.configure:
-            run(base + ["--help"], package)
+            run(base + ["--help", "-j1"], package, log=True)
             gates.append("build-graph")
         if args.metadata_tests:
             run([args.zig, "test", "src/metadata_index.zig", "--cache-dir", str(work / "test-cache"),
                  "--global-cache-dir", str(work / "test-global-cache"),
                  "--test-filter", "face location", "--test-filter", "PostScript lookup",
                  "--test-filter", "TT collection", "--test-filter", "metadata cache",
-                 "--test-filter", "fvar"], package)
+                 "--test-filter", "fvar"], package, log=True)
             gates.append("focused-metadata")
         if args.check:
-            run(base + ["check", "-j1", "--summary", "all"], package)
+            run(base + ["check", "-j1", "--summary", "all"], package, log=True)
             gates.append("platform-declarations")
         if args.concurrency_tests:
-            run(base + ["test-concurrency", "-j1", "--summary", "all"], package)
+            run(base + ["test-concurrency", "-j1", "--summary", "all"], package, log=True)
             gates.append("catalog-concurrency")
+        if args.coverage_matching_tests:
+            output = run(base + ["test-coverage-matching", "-j1", "--summary", "all"], package, log=True)
+            gate_results["catalog-coverage-matching"] = matching_test_counts(package, output)
+            gates.append("catalog-coverage-matching")
         if args.macos_oracle:
             if sys.platform != "darwin":
                 raise RuntimeError("CoreText oracle requires a macOS host")
-            run(base + ["test-macos-coretext", "-j1", "--summary", "all"], package)
+            run(base + ["test-macos-coretext", "-j1", "--summary", "all"], package, log=True)
             gates.append("macos-coretext")
         return {"schema_version": 1, "package_hash": package_hash,
                 "zig_version": run([args.zig, "version"], work),
                 "source": str(root), "exported_file_count": len(files),
-                "required_build_inputs": sorted(required), "gates": gates,
+                "required_build_inputs": sorted(required), "gates": gates, "gate_results": gate_results,
                 "files": {str(p.relative_to(package)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files
                           if not any(part in FORBIDDEN for part in p.relative_to(package).parts)}}
 
@@ -120,6 +150,7 @@ def main():
     parser.add_argument("--metadata-tests", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--concurrency-tests", action="store_true")
+    parser.add_argument("--coverage-matching-tests", action="store_true")
     parser.add_argument("--macos-oracle", action="store_true")
     args = parser.parse_args()
     try:

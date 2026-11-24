@@ -26,7 +26,8 @@ intact. No cached table pointers are returned through `Resolution`.
 Run the smallest deterministic verification from the Fontz repository:
 
 ```sh
-zig test src/root.zig --test-filter coverage --test-filter cmap
+zig test src/pure_discovery.zig --test-filter coverage --test-filter 'pure provider'
+zig build test-coverage-matching -j1
 ```
 
 `coverage workload reuses font IO across 128 distinct descriptors` builds a
@@ -38,9 +39,10 @@ it also executes the former table-read path and compares its coverage with the
 fixture's expected result. Production reader counters record actual successful
 opens, positional read calls, and bytes returned, rather than an estimate.
 
-Measured on 2026-11-24 with Zig 0.16.0 on macOS ARM64 in the default Debug
-configuration. The command above passed all 15 selected tests; the guarded
-compiler tree peaked at 261 MiB. The workload reported:
+The prior cache-reuse qualification was measured on 2026-11-24 with Zig 0.16.0
+on macOS ARM64 in the default Debug configuration. Its recorded gate passed
+15 selected tests; the guarded compiler tree peaked at 261 MiB. The workload
+reported:
 
 | Font-file work | Former per-query load | Coverage cache |
 | --- | ---: | ---: |
@@ -62,3 +64,23 @@ uncached oversized tables, allocation failures, generation invalidation, named
 instance sharing, and retained Resolution lifetime across eviction, refresh,
 and Discovery destruction. Malformed cmap offsets and glyph arithmetic fail
 closed without integer overflow.
+
+Coverage-aware catalog selection first proves the CSS best face. If it misses,
+the selector screens the remaining family and applies CSS ranking, continuing
+to later authored/generic families if needed. This can load more than one
+physical face's cmap on a first query miss; the synthetic sibling regression
+reads two fonts to find the covering sibling. When both physical fonts cover
+the codepoint, the cold control reads only the best face: 1 open, 4 reads,
+128 bytes.
+Named instances still share coverage by path and original TTC face index.
+The 128-descriptor workload uses exact PostScript selection and therefore
+continues to check one physical face per query. The new query-hit regression
+blocks both owner and output allocators after warmup, retains the same shared
+candidate block, and performs no additional font IO. These are deterministic
+allocation/IO checks, not a timing speedup claim.
+
+The 2026-11-25 coverage-aware matching qualification reran the provider/coverage
+gate (11/11) and recorded the same workload counts above. Its separate matching
+gate initially passed 17/17, then 18/18 with the cold IO control. See
+[the qualification record](coverage-aware-matching.md)
+for commands and retained logs.

@@ -21,6 +21,7 @@ const test_font = @import("test_font.zig");
 const metadata_cache = @import("index_cache.zig");
 const snapshot_mod = @import("snapshot.zig");
 const concurrency_hooks = @import("../concurrency_hooks.zig");
+const matching = @import("matching.zig");
 
 comptime {
     _ = @import("face_location_tests.zig");
@@ -136,6 +137,34 @@ pub const ReadLease = struct {
     pub fn findFace(self: ReadLease, query: types.Query, options: Options) ?*const Face {
         const snapshot = self.snapshot orelse return null;
         return findFaceInIndex(&snapshot.payload, query, options);
+    }
+
+    /// Choose the CSS best face among candidates accepted by the caller's
+    /// eligibility filter. The lease keeps all inspected metadata alive.
+    /// A PostScript query checks only that exact face, without family fallback.
+    pub fn findFaceFiltered(self: ReadLease, allocator: std.mem.Allocator, query: types.Query, options: Options, filter: anytype) !?*const Face {
+        const snapshot = self.snapshot orelse return null;
+        const index = &snapshot.payload;
+        if (query.postscript_name) |requested| {
+            const face = findByPostScriptIndex(index, requested) orelse return null;
+            return if (try filter.accept(face)) face else null;
+        }
+        var iterator = family_mod.FamilyIterator.init(query.family);
+        while (iterator.next()) |raw_family| {
+            const family = std.mem.trim(u8, raw_family, " \t\r\n");
+            if (family.len == 0) continue;
+            if (family_mod.genericFamily(family)) |generic| {
+                for (options.generic_mappings) |mapping| {
+                    if (mapping.generic != generic) continue;
+                    for (mapping.families) |mapped| {
+                        if (try findConcreteFiltered(index, allocator, mapped, query, filter)) |face| return face;
+                    }
+                }
+                continue;
+            }
+            if (try findConcreteFiltered(index, allocator, family, query, filter)) |face| return face;
+        }
+        return null;
     }
 
     pub fn findByPostScript(self: ReadLease, name: []const u8) ?*const Face {
@@ -369,6 +398,23 @@ fn findConcrete(index: *const Index, family: []const u8, query: types.Query) ?*c
     return selectBestFace(index.faces, indices.items, query);
 }
 
+fn findConcreteFiltered(index: *const Index, allocator: std.mem.Allocator, family: []const u8, query: types.Query, filter: anytype) !?*const Face {
+    var buffer: [512]u8 = undefined;
+    if (normalizeFamilyKeyInto(&buffer, family)) |key| {
+        if (key.len == 0) return null;
+        const candidates = index.family_index.get(key) orelse return null;
+        return matching.selectFiltered(Face, allocator, index.faces, candidates.items, query, filter);
+    }
+    // Preserve matching for long/localized names without truncation. Allocation
+    // failures unwind through the caller's lease instead of caching a miss.
+    var indices: std.ArrayList(u32) = .empty;
+    defer indices.deinit(allocator);
+    for (index.faces, 0..) |*face, face_index| {
+        if (faceMatchesFamily(face, family)) try indices.append(allocator, @intCast(face_index));
+    }
+    return matching.selectFiltered(Face, allocator, index.faces, indices.items, query, filter);
+}
+
 fn isHiddenFamilyName(name: []const u8) bool {
     return name.len != 0 and name[0] == '.';
 }
@@ -381,165 +427,8 @@ fn faceMatchesFamily(face: *const Face, family: []const u8) bool {
     return false;
 }
 
-/// CSS Fonts Level 3 face selection over a candidate index list.
-fn selectBestFace(
-    faces: []const Face,
-    indices: []const u32,
-    query: types.Query,
-) ?*const Face {
-    if (indices.len == 0) return null;
-    const stretch = matchingStretch(faces, indices, query.stretch) orelse return null;
-    const style = matchingStyle(faces, indices, stretch, query.style) orelse return null;
-    const weight = matchingWeight(faces, indices, stretch, style, query.weight) orelse return null;
-    var best: ?*const Face = null;
-    var best_score: f32 = std.math.inf(f32);
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const face = &faces[index];
-        if (face.stretch != stretch or face.style != style or face.weight != weight) continue;
-        if (query.opsz) |requested| {
-            const score = opszScore(face, requested);
-            if (score < best_score) {
-                best = face;
-                best_score = score;
-            }
-        } else {
-            return face;
-        }
-    }
-    return best;
-}
-
-/// Lower is better: a containing range wins, then the nearest range, and
-/// faces without `opsz` metadata rank last.
-fn opszScore(face: *const Face, requested: f32) f32 {
-    const min = face.opsz_min orelse return std.math.inf(f32);
-    const max = face.opsz_max orelse min;
-    if (requested < min) return min - requested;
-    if (requested > max) return requested - max;
-    const default = face.opsz_default orelse min;
-    return @abs(requested - default) * 1e-6;
-}
-
-fn matchingStretch(faces: []const Face, indices: []const u32, requested: u16) ?u16 {
-    for (indices) |index| {
-        if (index < faces.len and faces[index].stretch == requested) return requested;
-    }
-    if (requested <= 100) {
-        var below: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const value = faces[index].stretch;
-            if (value < requested and (below == null or value > below.?)) below = value;
-        }
-        if (below) |value| return value;
-        var above: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const value = faces[index].stretch;
-            if (value > requested and (above == null or value < above.?)) above = value;
-        }
-        return above;
-    }
-    var above: ?u16 = null;
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const value = faces[index].stretch;
-        if (value > requested and (above == null or value < above.?)) above = value;
-    }
-    if (above) |value| return value;
-    var below: ?u16 = null;
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const value = faces[index].stretch;
-        if (value < requested and (below == null or value > below.?)) below = value;
-    }
-    return below;
-}
-
-fn matchingStyle(
-    faces: []const Face,
-    indices: []const u32,
-    stretch: u16,
-    requested: types.Style,
-) ?types.Style {
-    const preference = switch (requested) {
-        .normal => [_]types.Style{ .normal, .oblique, .italic },
-        .italic => [_]types.Style{ .italic, .oblique, .normal },
-        .oblique => [_]types.Style{ .oblique, .italic, .normal },
-    };
-    for (preference) |style| {
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const face = &faces[index];
-            if (face.stretch == stretch and face.style == style) return style;
-        }
-    }
-    return null;
-}
-
-fn matchingWeight(
-    faces: []const Face,
-    indices: []const u32,
-    stretch: u16,
-    style: types.Style,
-    requested: u16,
-) ?u16 {
-    const eligible = struct {
-        fn check(faces_: []const Face, indices_: []const u32, stretch_: u16, style_: types.Style, weight_: u16) bool {
-            for (indices_) |index| {
-                if (index >= faces_.len) continue;
-                const face = &faces_[index];
-                if (face.stretch == stretch_ and face.style == style_ and face.weight == weight_) return true;
-            }
-            return false;
-        }
-    };
-    if (eligible.check(faces, indices, stretch, style, requested)) return requested;
-    if (requested >= 400 and requested < 450 and eligible.check(faces, indices, stretch, style, 500)) {
-        return 500;
-    }
-    if (requested >= 450 and requested <= 500 and eligible.check(faces, indices, stretch, style, 400)) {
-        return 400;
-    }
-    if (requested <= 500) {
-        var below: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const face = &faces[index];
-            if (face.stretch != stretch or face.style != style) continue;
-            const value = face.weight;
-            if (value <= requested and (below == null or value > below.?)) below = value;
-        }
-        if (below) |value| return value;
-        var above: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const face = &faces[index];
-            if (face.stretch != stretch or face.style != style) continue;
-            const value = face.weight;
-            if (value > requested and (above == null or value < above.?)) above = value;
-        }
-        return above;
-    }
-    var above: ?u16 = null;
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const face = &faces[index];
-        if (face.stretch != stretch or face.style != style) continue;
-        const value = face.weight;
-        if (value >= requested and (above == null or value < above.?)) above = value;
-    }
-    if (above) |value| return value;
-    var below: ?u16 = null;
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const face = &faces[index];
-        if (face.stretch != stretch or face.style != style) continue;
-        const value = face.weight;
-        if (value < requested and (below == null or value > below.?)) below = value;
-    }
-    return below;
+fn selectBestFace(faces: []const Face, indices: []const u32, query: types.Query) ?*const Face {
+    return matching.selectBestFace(Face, faces, indices, query);
 }
 
 /// Acquire a stable catalog view. Failed builds also report the epoch actually

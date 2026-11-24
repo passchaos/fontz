@@ -15,6 +15,8 @@ libc.
 | `types` | `Query`, `Candidate`, `Resolution`, `Service`, missing-glyph types |
 | `family` | CSS family-list tokenization, generic-family classification, width-class conversion, UTF-8-aware family comparison |
 | `metadata/index` | bounded sfnt catalog, CSS-like matching, family/PostScript indexes, process-wide cache |
+| `metadata/matching` | CSS ranking over candidate indexes, with optional eligibility screening |
+| `metadata/coverage_filter` | per-discovery cmap eligibility using the actual catalog read epoch |
 | `metadata/parse` | sfnt `name`/`OS/2`/`post`/`fvar` parsing, original TTC face identity |
 | `metadata/fontconfig` | pure-Zig fontconfig XML configuration reader (`<dir>`, `<include>`, `<alias>`) |
 | `metadata/cmap` | minimal `cmap` coverage reader (formats 0, 4, 6, 12, 13) |
@@ -52,8 +54,9 @@ weight. The metadata index implements this directly.
   `AssetsV2` + Windows per-user fonts);
 - builds generic-family mappings from fontconfig aliases, filling missing
   generics with platform defaults;
-- resolves the family/PostScript query through `metadata_index.findFace`;
-- verifies `required_codepoint` with `metadata/cmap`;
+- resolves family/PostScript queries under a metadata-index read lease;
+- screens catalog candidates for `required_codepoint` through the owned cmap
+  cache before CSS ranking, then tries script hints if the authored stack misses;
 - appends deterministic `fallback_paths` candidates up to `max_candidates`;
 - caches resolutions through the shared reference-counted query cache.
 
@@ -156,6 +159,33 @@ High-level resolution holds a lease through matching, coverage, and candidate
 copying; family enumeration holds one through all string copies. The historical
 raw `findFace`, `findFamily`, and `findByPostScript` APIs still return borrowed
 pointers: their callers must quiesce reset through lookup and subsequent use.
+
+For `required_codepoint`, the pure provider supplies an eligibility filter to
+`ReadLease.findFaceFiltered`. Matching first checks the CSS best face for
+coverage and returns it immediately when proven. Otherwise it screens the
+remaining family's candidate indexes, skipping the already failed face, and
+applies the existing stretch, style, weight, and opsz ordering to the covered
+subset. Static faces remain eligible after faces with
+optical-size metadata. If that subset is empty, matching continues to the next
+authored family or next concrete family in a generic mapping. Coverage comes
+from the caller's cmap cache; the metadata index itself still parses no cmap.
+Both the selected face and every candidate inspected remain under the lease.
+Script hints follow the authored stack instead of replacing it, preserving
+custom CJK generic mappings and later family names. The opsz ranker initializes
+its first candidate even when its score is infinite, so static fonts remain
+selectable when all faces at that CSS rank lack an axis. Finite range scores
+still replace that candidate, and ties preserve catalog order.
+
+An explicit PostScript name checks only that exact catalog face for coverage;
+it cannot substitute another family member or named instance. Queries without
+a codepoint keep the original matcher. This does not increase the number of
+catalog candidates returned: the provider selects its single best covered face
+before considering its existing platform fallback paths.
+
+Eligible-index storage uses a 64-entry stack buffer, with allocator-backed
+storage for larger families and long-name scans. Errors free temporary indexes
+and release the read lease. Cmap allocation failures propagate before query
+cache adoption, so a transient OOM cannot install a negative resolution.
 
 Each `Discovery` serializes resolve, prewarm, enumeration, coverage, stats, and
 the entire refresh configuration preparation/swap with its owner mutex. Refresh
