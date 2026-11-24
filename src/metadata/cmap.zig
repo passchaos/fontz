@@ -51,8 +51,25 @@ pub fn tableCovers(cmap: []const u8, codepoint: u21) bool {
     return tableGlyph(cmap, codepoint, false) != null;
 }
 
-fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
-    if (!unicode.isScalar(codepoint)) return null;
+pub const WorkStats = struct {
+    encoding_records: u64 = 0,
+    group_visits: u64 = 0,
+    preparation_visits: u64 = 0,
+    binary_queries: u64 = 0,
+    linear_queries: u64 = 0,
+};
+
+pub const Subtable = struct { offset: u32, format: u16 };
+
+pub fn scalarSubtable(bytes: []const u8) ?Subtable {
+    return selectSubtable(false, bytes, false, null);
+}
+
+pub fn scalarSubtableCounted(bytes: []const u8, work: *WorkStats) ?Subtable {
+    return selectSubtable(true, bytes, false, work);
+}
+
+fn selectSubtable(comptime counted: bool, cmap: []const u8, strict_length: bool, work: ?*WorkStats) ?Subtable {
     if (cmap.len < 4) return null;
     if (strict_length and readU16(cmap, 0) != 0) return null;
     const count = readU16(cmap, 2) orelse return null;
@@ -63,6 +80,7 @@ fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
     var best_score: u8 = 0;
     var index: usize = 0;
     while (index < count) : (index += 1) {
+        if (counted) work.?.encoding_records += 1;
         const record = 4 + index * 8;
         const platform = readU16(cmap, record) orelse continue;
         const encoding = readU16(cmap, record + 2) orelse continue;
@@ -80,6 +98,23 @@ fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
     }
     const offset = best_offset orelse return null;
     const format = readU16(cmap, offset) orelse return null;
+    return .{ .offset = offset, .format = format };
+}
+
+/// Opt-in test/workload counter. Production calls instantiate no counters.
+pub fn tableCoversCounted(bytes: []const u8, codepoint: u21, work: *WorkStats) bool {
+    return tableGlyphImpl(true, bytes, codepoint, false, work) != null;
+}
+
+fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
+    return tableGlyphImpl(false, cmap, codepoint, strict_length, null);
+}
+
+fn tableGlyphImpl(comptime counted: bool, cmap: []const u8, codepoint: u21, strict_length: bool, work: ?*WorkStats) ?u32 {
+    if (!unicode.isScalar(codepoint)) return null;
+    const selected = selectSubtable(counted, cmap, strict_length, work) orelse return null;
+    const offset = selected.offset;
+    const format = selected.format;
     var subtable = cmap[offset..];
     if (strict_length) {
         // Nominal scalar queries retain their historical parser behavior.
@@ -95,7 +130,7 @@ fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
         0 => format0Glyph(subtable, codepoint),
         4 => format4Glyph(subtable, codepoint),
         6 => format6Glyph(subtable, codepoint),
-        12, 13 => format12Glyph(subtable, codepoint, format == 13),
+        12, 13 => format12GlyphImpl(counted, subtable, codepoint, format == 13, work),
         else => null,
     };
 }
@@ -184,12 +219,18 @@ fn format12Covers(subtable: []const u8, codepoint: u21, many_to_one: bool) bool 
 }
 
 fn format12Glyph(subtable: []const u8, codepoint: u21, many_to_one: bool) ?u32 {
+    return format12GlyphImpl(false, subtable, codepoint, many_to_one, null);
+}
+
+fn format12GlyphImpl(comptime counted: bool, subtable: []const u8, codepoint: u21, many_to_one: bool, work: ?*WorkStats) ?u32 {
     if (subtable.len < 16) return null;
     const group_count = readU32(subtable, 12) orelse return null;
     if (group_count == 0 or group_count > 1_000_000) return null;
     if (16 + @as(usize, group_count) * 12 > subtable.len) return null;
+    if (counted) work.?.linear_queries += 1;
     var index: usize = 0;
     while (index < group_count) : (index += 1) {
+        if (counted) work.?.group_visits += 1;
         const group = 16 + index * 12;
         const start = readU32(subtable, group) orelse return null;
         const end = readU32(subtable, group + 4) orelse return null;

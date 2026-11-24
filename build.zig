@@ -43,6 +43,31 @@ pub fn build(b: *std.Build) void {
     coverage_matching_step.dependOn(&run_coverage_matching_tests.step);
     test_step.dependOn(&run_coverage_matching_tests.step);
 
+    const prepared_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/prepared_cmap_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"prepared cmap"},
+    });
+    const run_prepared_tests = b.addRunArtifact(prepared_tests);
+    const prepared_step = b.step("test-prepared-cmap", "Run retained scalar cmap lookup and lifecycle regressions");
+    prepared_step.dependOn(&run_prepared_tests.step);
+    test_step.dependOn(&run_prepared_tests.step);
+
+    const cmap_bench = b.addExecutable(.{
+        .name = "cmap-lookup-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cmap_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_cmap_bench = b.addInstallArtifact(cmap_bench, .{});
+    const cmap_bench_step = b.step("bench-cmap", "Build the existing coverage-cache scalar lookup benchmark");
+    cmap_bench_step.dependOn(&install_cmap_bench.step);
+
     const variation_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/variation_sequence_tests.zig"),

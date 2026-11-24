@@ -10,6 +10,7 @@
         "src",
         "tests",
         "tools/verify_package_export.py",
+        "tools/run_cmap_abba.py",
         "docs",
         "README.md",
     },

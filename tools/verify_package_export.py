@@ -154,6 +154,11 @@ def verify(args):
             gate_results["variation-api"] = test_counts(package, output, "test-variation-api",
                 ["tests/variation_api_test.zig"], "variation sequence published API", 0)
             gates.append("variation-api")
+        if args.prepared_cmap_tests:
+            output = run(base + ["test-prepared-cmap", "-j1", "--summary", "all"], package, log=True)
+            gate_results["prepared-cmap"] = test_counts(package, output, "test-prepared-cmap",
+                ["src/metadata/prepared_tests.zig"], "prepared cmap", 1)
+            gates.append("prepared-cmap")
         if args.macos_oracle:
             if sys.platform != "darwin":
                 raise RuntimeError("CoreText oracle requires a macOS host")
@@ -178,6 +183,7 @@ def main():
     parser.add_argument("--concurrency-tests", action="store_true")
     parser.add_argument("--coverage-matching-tests", action="store_true")
     parser.add_argument("--variation-sequence-tests", action="store_true")
+    parser.add_argument("--prepared-cmap-tests", action="store_true")
     parser.add_argument("--macos-oracle", action="store_true")
     args = parser.parse_args()
     try:

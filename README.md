@@ -255,3 +255,10 @@ against the exported named tests and includes those counts in the JSON report.
 `--macos-oracle` runs CoreText matching on macOS. The package workflow runs these
 gates on Linux and macOS; a local success does not imply the hosted workflow has
 already completed.
+
+Retained scalar coverage now prepares ordered format12/13 groups once and uses
+binary search over the owned cmap bytes. Malformed ordering retains historical
+linear behavior; variation sequences keep their strict coverage path. Run
+`zig build test-prepared-cmap test-coverage-matching test-variation-sequences -j1`
+for the focused gates. See [the lookup measurements](docs/benchmarks/prepared-cmap-lookup.md)
+for matched public-cache benchmarks, preparation costs, and resource accounting.
