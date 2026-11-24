@@ -242,6 +242,14 @@ pub const DiscoveryStats = struct {
     cache_hits: u64 = 0,
     cache_misses: u64 = 0,
     cache_entries: usize = 0,
+    coverage_cache_hits: u64 = 0,
+    coverage_cache_misses: u64 = 0,
+    coverage_cache_entries: usize = 0,
+    /// Retained cmap tables and owned path keys.
+    coverage_cache_bytes: usize = 0,
+    coverage_file_opens: u64 = 0,
+    coverage_read_calls: u64 = 0,
+    coverage_bytes_read: u64 = 0,
 };
 
 /// Spacing behavior required of a fallback font. A host can use this to pick a

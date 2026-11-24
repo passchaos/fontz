@@ -28,6 +28,8 @@ pub const TestFontOptions = struct {
     instances: []const TestInstance = &.{},
     /// Optional synthetic `opsz` axis range.
     opsz: ?TestAxis = null,
+    /// Optional cmap bytes for coverage-cache workloads.
+    cmap: ?[]const u8 = null,
 };
 
 pub fn buildTestNameTable(allocator: std.mem.Allocator, options: TestFontOptions) ![]u8 {
@@ -134,13 +136,14 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     defer if (fvar_table) |table| allocator.free(table);
     const os2_len = 96;
     const post_len = 32;
-    const table_count: u16 = if (fvar_table != null) 4 else 3;
+    const table_count: u16 = @as(u16, if (fvar_table != null) 4 else 3) + @as(u16, @intFromBool(options.cmap != null));
     const dir_len = @as(usize, table_count) * 16;
     const name_offset = 12 + dir_len;
     const os2_offset = align4(name_offset + name_table.len);
     const post_offset = align4(os2_offset + os2_len);
     const fvar_offset = align4(post_offset + post_len);
-    const total = align4(fvar_offset + (if (fvar_table) |table| table.len else 0));
+    const cmap_offset = align4(fvar_offset + (if (fvar_table) |table| table.len else 0));
+    const total = align4(cmap_offset + (if (options.cmap) |table| table.len else 0));
     const bytes = try allocator.alloc(u8, total);
     @memset(bytes, 0);
     std.mem.writeInt(u32, bytes[0..4], 0x00010000, .big);
@@ -152,6 +155,10 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     if (fvar_table) |table| {
         writeTestTableRecord(bytes, 3, "fvar", fvar_offset, table.len);
         @memcpy(bytes[fvar_offset..][0..table.len], table);
+    }
+    if (options.cmap) |table| {
+        writeTestTableRecord(bytes, if (fvar_table != null) 4 else 3, "cmap", cmap_offset, table.len);
+        @memcpy(bytes[cmap_offset..][0..table.len], table);
     }
     @memcpy(bytes[name_offset..][0..name_table.len], name_table);
     const os2 = bytes[os2_offset..][0..os2_len];
@@ -165,6 +172,33 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     std.mem.writeInt(u32, post[0..4], 0x00020000, .big);
     if (options.italic) std.mem.writeInt(u32, post[4..8], 0xFFFF_0000, .big);
     if (options.monospaced) std.mem.writeInt(u32, post[12..16], 1, .big);
+    return bytes;
+}
+
+pub const TestCoverageGroup = struct {
+    start: u32,
+    end: u32,
+    glyph: u32 = 1,
+};
+
+pub fn buildTestCmap(allocator: std.mem.Allocator, groups: []const TestCoverageGroup, format: u16) ![]u8 {
+    std.debug.assert(format == 12 or format == 13);
+    const bytes = try allocator.alloc(u8, 12 + 16 + groups.len * 12);
+    @memset(bytes, 0);
+    std.mem.writeInt(u16, bytes[2..4], 1, .big);
+    std.mem.writeInt(u16, bytes[4..6], 3, .big);
+    std.mem.writeInt(u16, bytes[6..8], 10, .big);
+    std.mem.writeInt(u32, bytes[8..12], 12, .big);
+    const table = bytes[12..];
+    std.mem.writeInt(u16, table[0..2], format, .big);
+    std.mem.writeInt(u32, table[4..8], @intCast(table.len), .big);
+    std.mem.writeInt(u32, table[12..16], @intCast(groups.len), .big);
+    for (groups, 0..) |group, index| {
+        const out = table[16 + index * 12 ..][0..12];
+        std.mem.writeInt(u32, out[0..4], group.start, .big);
+        std.mem.writeInt(u32, out[4..8], group.end, .big);
+        std.mem.writeInt(u32, out[8..12], group.glyph, .big);
+    }
     return bytes;
 }
 

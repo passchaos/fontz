@@ -28,6 +28,12 @@ libc.
   Linux to discover configured font directories and generic-family aliases.
 - `metadata/cmap`: minimal pure-Zig `cmap` coverage reader (formats 0, 4, 6,
   12, 13) used to verify `required_codepoint`.
+- `metadata/coverage_cache`: per-discovery LRU of owned cmap tables keyed by
+  absolute path and TTC face index. Different descriptors, named instances,
+  and codepoints reuse the table without reopening the font. It retains at
+  most 64 entries and 16 MiB of table/path bytes. Tables that exceed the cache
+  budget are queried and freed. The reader keeps its existing 16 MiB single
+  table cap; one miss can temporarily use another 16 MiB while loading.
 - `fallback_paths`: deterministic path candidates for roles, generic families,
   scripts and CJK TTC face indexes. Codepoint-driven fallback verifies `cmap`
   coverage before returning a candidate and prefers native macOS faces
@@ -88,6 +94,21 @@ defer fontz.freeFamilyNames(allocator, names);
 Resolutions returned by the provider cache are reference-counted: cache hits
 retain the cached candidates instead of cloning every string. `deinit` always
 releases the caller's reference.
+
+Coverage storage has an independent lifetime: clearing or evicting a cmap
+table cannot invalidate a retained `Resolution`. `refresh` clears both caches;
+an external `metadata_index.reset` invalidates them through the index
+generation. Font files are treated as an index snapshot until that refresh or
+reset. Malformed/missing cmap tables cache a structural negative within the
+snapshot; IO and table-allocation failures remain retryable. Cache-installation
+allocation failures preserve the successfully computed coverage result.
+
+`Discovery.stats()` includes cumulative `coverage_cache_hits`,
+`coverage_cache_misses`, `coverage_file_opens`, `coverage_read_calls`, and
+`coverage_bytes_read`, plus current `coverage_cache_entries` and
+`coverage_cache_bytes`. These file counts describe coverage loading, separately
+from metadata indexing. The [counted IO workload](docs/benchmarks/system-font-coverage.md)
+compares 128 distinct descriptors with the former per-query reads.
 
 ## Missing glyphs
 

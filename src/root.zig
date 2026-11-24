@@ -13,7 +13,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
-const cmap = @import("metadata/cmap.zig");
 
 pub const Role = types.Role;
 pub const Provider = types.Provider;
@@ -85,7 +84,7 @@ pub const Discovery = struct {
         var resolution = try self.platform.resolve(allocator, query);
         if (resolution.candidates.len == 0) {
             resolution.deinit();
-            return try fallbackResolution(allocator, role, query);
+            return try fallbackResolution(&self.platform, allocator, role, query);
         }
         return resolution;
     }
@@ -110,7 +109,7 @@ pub const Discovery = struct {
         var resolution = try self.platform.resolve(allocator, platform_query);
         if (resolution.candidates.len == 0) {
             resolution.deinit();
-            return try fallbackResolutionForQuery(allocator, query);
+            return try fallbackResolutionForQuery(&self.platform, allocator, query);
         }
         return resolution;
     }
@@ -227,6 +226,7 @@ pub fn queryForRole(role: Role, language: ?[]const u8) Query {
 }
 
 fn fallbackResolution(
+    discovery: *PlatformDiscovery,
     allocator: std.mem.Allocator,
     role: Role,
     query: Query,
@@ -237,18 +237,20 @@ fn fallbackResolution(
         query.weight,
         query.style,
     );
-    return buildFallbackResolution(allocator, candidates, role == .monospace, query);
+    return buildFallbackResolution(discovery, allocator, candidates, role == .monospace, query);
 }
 
 fn fallbackResolutionForQuery(
+    discovery: *PlatformDiscovery,
     allocator: std.mem.Allocator,
     query: Query,
 ) !Resolution {
     const candidates = fallback_paths.forQuery(query);
-    return buildFallbackResolution(allocator, candidates, false, query);
+    return buildFallbackResolution(discovery, allocator, candidates, false, query);
 }
 
 fn buildFallbackResolution(
+    discovery: *PlatformDiscovery,
     allocator: std.mem.Allocator,
     candidates: []const fallback_paths.CandidatePath,
     monospaced: bool,
@@ -263,7 +265,7 @@ fn buildFallbackResolution(
     for (candidates) |candidate| {
         if (!pathExists(candidate.path)) continue;
         if (query.required_codepoint) |codepoint| {
-            if (!(cmap.coversCodepoint(std.Options.debug_io, candidate.path, candidate.face_index, codepoint) catch false)) continue;
+            if (!(discovery.coversCodepoint(candidate.path, candidate.face_index, codepoint) catch false)) continue;
         }
         var resolved = try Candidate.init(
             allocator,
@@ -340,13 +342,49 @@ test "service contract forwards resolution and missing glyph sink" {
 }
 
 test "fallback resolution returns existing deterministic paths" {
-    var resolution = try fallbackResolutionForQuery(std.testing.allocator, .{
+    var discovery = PlatformDiscovery.init(std.testing.allocator);
+    defer discovery.deinit();
+    var resolution = try fallbackResolutionForQuery(&discovery, std.testing.allocator, .{
         .family = "monospace",
     });
     defer resolution.deinit();
     for (resolution.candidates) |candidate| {
         try std.testing.expect(pathExists(candidate.path));
     }
+}
+
+test "coverage fallback construction reuses the provider table for different queries" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const test_font = @import("metadata/test_font.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const table = try test_font.buildTestCmap(allocator, &.{.{ .start = 'A', .end = 'Z' }}, 12);
+    defer allocator.free(table);
+    const font = try test_font.buildTestFont(allocator, .{ .family = "Coverage Sans", .cmap = table });
+    defer allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "coverage.ttf", .data = font });
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &buffer);
+    const path = try std.fs.path.join(allocator, &.{ buffer[0..len], "coverage.ttf" });
+    defer allocator.free(path);
+    const roots = [_][]const u8{buffer[0..len]};
+    var discovery = try PlatformDiscovery.initWithRoots(allocator, &roots);
+    defer discovery.deinit();
+    // The provider already rejected one codepoint in this face. The wrapper's
+    // fallback builder must reuse its table for both rejected and valid ones.
+    try std.testing.expect(!try discovery.coversCodepoint(path, 0, 'a'));
+    const paths = [_]fallback_paths.CandidatePath{.{ .path = path }};
+    for ([_]u21{ 'b', 'A', 'Z' }) |codepoint| {
+        var resolution = try buildFallbackResolution(&discovery, allocator, &paths, false, .{
+            .family = "Coverage Sans",
+            .required_codepoint = codepoint,
+        });
+        defer resolution.deinit();
+        try std.testing.expectEqual(@as(usize, if (codepoint == 'b') 0 else 1), resolution.candidates.len);
+    }
+    try std.testing.expectEqual(@as(u64, 1), discovery.stats().coverage_file_opens);
+    try std.testing.expectEqual(@as(u64, 3), discovery.stats().coverage_cache_hits);
 }
 
 test {

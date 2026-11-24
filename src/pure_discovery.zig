@@ -11,13 +11,14 @@ const family_mod = @import("family.zig");
 const fallback_paths = @import("fallback_paths.zig");
 const metadata_index = @import("metadata_index.zig");
 const fontconfig = @import("metadata/fontconfig.zig");
-const cmap = @import("metadata/cmap.zig");
+const coverage_cache = @import("metadata/coverage_cache.zig");
 const query_cache = @import("query_cache.zig");
 
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     cache: query_cache.Cache,
+    coverage: coverage_cache.Cache,
     generation_value: u64 = 1,
     config: fontconfig.Config,
     roots: []const []const u8,
@@ -36,6 +37,7 @@ pub const Discovery = struct {
         return .{
             .allocator = allocator,
             .cache = query_cache.Cache.init(allocator),
+            .coverage = coverage_cache.Cache.init(allocator),
             .config = config,
             .roots = roots,
             .generic_mappings = mappings,
@@ -55,6 +57,7 @@ pub const Discovery = struct {
         return .{
             .allocator = allocator,
             .cache = query_cache.Cache.init(allocator),
+            .coverage = coverage_cache.Cache.init(allocator),
             .config = config,
             .roots = copied,
             .generic_mappings = mappings,
@@ -65,6 +68,7 @@ pub const Discovery = struct {
         self.mutex.lockUncancelable(std.Options.debug_io);
         self.config.deinit();
         self.cache.deinit();
+        self.coverage.deinit();
         self.mutex.unlock(std.Options.debug_io);
         self.* = undefined;
     }
@@ -109,16 +113,31 @@ pub const Discovery = struct {
         self.generation_value +%= 1;
         if (self.generation_value == 0) self.generation_value = 1;
         self.cache.clear();
+        self.coverage.clear();
         metadata_index.reset(io);
         return true;
     }
 
     pub fn stats(self: *Discovery) types.DiscoveryStats {
-        return query_cache.Cache.cachedStats(
-            &self.cache,
-            &self.mutex,
-            self.generation_value,
-        );
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        var result = self.cache.stats(self.generation_value);
+        result.coverage_cache_hits = self.coverage.hits;
+        result.coverage_cache_misses = self.coverage.misses;
+        result.coverage_cache_entries = self.coverage.entries.items.len;
+        result.coverage_cache_bytes = self.coverage.resident_bytes;
+        result.coverage_file_opens = self.coverage.reads.file_opens;
+        result.coverage_read_calls = self.coverage.reads.read_calls;
+        result.coverage_bytes_read = self.coverage.reads.bytes_read;
+        return result;
+    }
+
+    /// Reuse coverage for the public wrapper's fallback path as well as normal
+    /// descriptor resolution. The result owns no cached storage.
+    pub fn coversCodepoint(self: *Discovery, path: []const u8, face_index: u32, codepoint: u21) !bool {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
+        return self.coverage.coversCodepoint(std.Options.debug_io, path, face_index, codepoint, metadata_index.generation());
     }
 
     /// Builds the metadata index ahead of the first query. Safe to call from a
@@ -157,7 +176,7 @@ pub const Discovery = struct {
         var face = metadata_index.findFace(io, hinted, options);
         if (face) |selected| {
             if (query.required_codepoint) |codepoint| {
-                if (!(cmap.coversCodepoint(io, selected.path, selected.face_index, codepoint) catch false)) {
+                if (!(self.coverage.coversCodepoint(io, selected.path, selected.face_index, codepoint, metadata_index.generation()) catch false)) {
                     face = null;
                 }
             }
@@ -193,7 +212,7 @@ pub const Discovery = struct {
             if (candidates.items.len >= query.max_candidates) break;
             if (!pathExists(fallback.path)) continue;
             if (query.required_codepoint) |codepoint| {
-                if (!(cmap.coversCodepoint(io, fallback.path, fallback.face_index, codepoint) catch false)) continue;
+                if (!(self.coverage.coversCodepoint(io, fallback.path, fallback.face_index, codepoint, metadata_index.generation()) catch false)) continue;
             }
             if (containsCandidate(candidates.items, fallback.path, fallback.face_index)) continue;
             var candidate = try types.Candidate.init(
@@ -605,4 +624,153 @@ test "pure provider prewarms the metadata index without a query" {
     try std.testing.expect(resolution.candidates.len > 0);
     try std.testing.expectEqual(types.Provider.metadata_index, resolution.provider);
     try std.testing.expectEqualStrings("Prewarm Sans", resolution.candidates[0].family.?);
+}
+
+test "coverage workload reuses font IO across 128 distinct descriptors" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const test_font = @import("metadata/test_font.zig");
+    const cmap = @import("metadata/cmap.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const table = try test_font.buildTestCmap(allocator, &.{.{ .start = 'A', .end = 'Z' }}, 12);
+    defer allocator.free(table);
+    const font = try test_font.buildTestFont(allocator, .{
+        .family = "Coverage Sans",
+        .postscript_name = "CoverageSans-Regular",
+        .cmap = table,
+    });
+    defer allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "coverage.ttf", .data = font });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buffer);
+    const roots = [_][]const u8{root_buffer[0..root_len]};
+    const path = try std.fs.path.join(allocator, &.{ roots[0], "coverage.ttf" });
+    defer allocator.free(path);
+    metadata_index.resetForTesting(io);
+    defer metadata_index.resetForTesting(io);
+    var discovery = try Discovery.initWithRoots(allocator, &roots);
+    defer discovery.deinit();
+    try std.testing.expect(discovery.prewarm());
+    var baseline: cmap.ReadStats = .{};
+    for (0..128) |index| {
+        const codepoint: u21 = if (index % 4 == 0) 0x1f600 else 'A' + @as(u21, @intCast(index % 26));
+        const expected = index % 4 != 0;
+        // Execute the former per-query table load, rather than estimating its
+        // work. Both paths must match the fixture's independent expectation.
+        const uncached_table = (try cmap.readTable(io, allocator, path, 0, &baseline)).?;
+        defer allocator.free(uncached_table);
+        try std.testing.expectEqual(expected, cmap.tableCovers(uncached_table, codepoint));
+        var resolution = try discovery.resolve(allocator, .{
+            .family = "Coverage Sans",
+            .postscript_name = "CoverageSans-Regular",
+            .required_codepoint = codepoint,
+            .weight = @intCast(100 + index),
+            .language = if (index % 2 == 0) "en-US" else "ja-JP",
+            .max_candidates = 1,
+        });
+        defer resolution.deinit();
+        try std.testing.expectEqual(@as(usize, if (expected) 1 else 0), resolution.candidates.len);
+        if (expected) {
+            try std.testing.expectEqualStrings(path, resolution.candidates[0].path);
+            try std.testing.expectEqual(@as(?u32, 0), resolution.candidates[0].face_index);
+            try std.testing.expectEqual(@as(u16, 0), resolution.candidates[0].named_instance);
+        }
+    }
+    const stats = discovery.stats();
+    try std.testing.expectEqual(@as(u64, 128), stats.cache_misses);
+    try std.testing.expectEqual(@as(u64, 0), stats.cache_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.coverage_cache_misses);
+    try std.testing.expectEqual(@as(u64, 127), stats.coverage_cache_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.coverage_file_opens);
+    try std.testing.expectEqual(baseline.read_calls / 128, stats.coverage_read_calls);
+    try std.testing.expectEqual(baseline.bytes_read / 128, stats.coverage_bytes_read);
+    std.debug.print("\ncoverage workload: descriptors=128 positive=96 negative=32\n" ++
+        "uncached opens={d} reads={d} bytes={d}\n" ++
+        "cached   opens={d} reads={d} bytes={d} hits={d} misses={d}\n", .{
+        baseline.file_opens,       baseline.read_calls,         baseline.bytes_read,
+        stats.coverage_file_opens, stats.coverage_read_calls,   stats.coverage_bytes_read,
+        stats.coverage_cache_hits, stats.coverage_cache_misses,
+    });
+}
+
+test "coverage generation and refresh preserve independent shared resolution lifetimes" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const test_font = @import("metadata/test_font.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const table = try test_font.buildTestCmap(allocator, &.{.{ .start = 'A', .end = 'Z' }}, 12);
+    defer allocator.free(table);
+    const font = try test_font.buildTestFont(allocator, .{
+        .family = "Coverage Sans",
+        .postscript_name = "CoverageSans-Regular",
+        .cmap = table,
+        .instances = &.{
+            .{ .subfamily = "Light", .postscript_name = "CoverageSans-Light", .weight = 300 },
+            .{ .subfamily = "Bold", .postscript_name = "CoverageSans-Bold", .weight = 700 },
+        },
+    });
+    defer allocator.free(font);
+    try tmp.dir.writeFile(io, .{ .sub_path = "coverage.ttf", .data = font });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buffer);
+    const roots = [_][]const u8{root_buffer[0..root_len]};
+    metadata_index.resetForTesting(io);
+    defer metadata_index.resetForTesting(io);
+    var discovery = try Discovery.initWithRoots(allocator, &roots);
+    var live = true;
+    defer if (live) discovery.deinit();
+    const query = types.Query{
+        .family = "Coverage Sans",
+        .postscript_name = "CoverageSans-Light",
+        .weight = 300,
+        .required_codepoint = 'A',
+        .max_candidates = 1,
+    };
+    var held = try discovery.resolve(allocator, query);
+    defer held.deinit();
+    try std.testing.expectEqual(@as(u16, 1), held.candidates[0].named_instance);
+    var bold = try discovery.resolve(allocator, .{
+        .family = "Coverage Sans",
+        .postscript_name = "CoverageSans-Bold",
+        .weight = 700,
+        .required_codepoint = 'B',
+        .max_candidates = 1,
+    });
+    defer bold.deinit();
+    try std.testing.expectEqual(@as(u16, 2), bold.candidates[0].named_instance);
+    try std.testing.expectEqual(@as(u64, 1), discovery.stats().coverage_file_opens);
+    discovery.coverage.clear();
+    var hit = try discovery.resolve(allocator, query);
+    defer hit.deinit();
+    try std.testing.expect(held.candidates.ptr == hit.candidates.ptr);
+    try std.testing.expectEqual(@as(u64, 1), discovery.stats().coverage_file_opens);
+    try std.testing.expectEqual(@as(usize, 0), discovery.stats().coverage_cache_entries);
+
+    // Replacing only cmap contents keeps the face identity but changes proof.
+    // External index resets must invalidate both caches for the same query.
+    const replacement_table = try test_font.buildTestCmap(allocator, &.{.{ .start = 0x1f600, .end = 0x1f64f }}, 12);
+    defer allocator.free(replacement_table);
+    const replacement = try test_font.buildTestFont(allocator, .{
+        .family = "Coverage Sans",
+        .postscript_name = "CoverageSans-Light",
+        .cmap = replacement_table,
+    });
+    defer allocator.free(replacement);
+    try tmp.dir.writeFile(io, .{ .sub_path = "coverage.ttf", .data = replacement });
+    metadata_index.resetForTesting(io);
+    var missing = try discovery.resolve(allocator, query);
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), missing.candidates.len);
+    try std.testing.expectEqual(@as(u64, 2), discovery.stats().coverage_file_opens);
+    const generation = discovery.stats().generation;
+    try std.testing.expect(try discovery.refresh());
+    try std.testing.expect(discovery.stats().generation != generation);
+    try std.testing.expectEqual(@as(usize, 0), discovery.stats().coverage_cache_entries);
+    discovery.deinit();
+    live = false;
+    try std.testing.expectEqualStrings("CoverageSans-Light", held.candidates[0].postscript_name.?);
+    try std.testing.expectEqual(@as(u16, 2), bold.candidates[0].named_instance);
+    try std.testing.expect(held.candidates.ptr == hit.candidates.ptr);
 }

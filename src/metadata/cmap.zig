@@ -6,7 +6,15 @@
 
 const std = @import("std");
 
-const max_cmap_bytes = 16 * 1024 * 1024;
+pub const max_cmap_bytes = 16 * 1024 * 1024;
+
+/// Counts actual font-file work, including short reads. Used by the coverage
+/// cache and its counted-IO workload; table queries do not touch these counts.
+pub const ReadStats = struct {
+    file_opens: u64 = 0,
+    read_calls: u64 = 0,
+    bytes_read: u64 = 0,
+};
 
 pub fn coversCodepoint(
     io: std.Io,
@@ -14,30 +22,46 @@ pub fn coversCodepoint(
     face_index: u32,
     codepoint: u21,
 ) !bool {
+    const table = (try readTable(io, std.heap.page_allocator, path, face_index, null)) orelse return false;
+    defer std.heap.page_allocator.free(table);
+    return tableCovers(table, codepoint);
+}
+
+/// Read one face's bounded cmap table. The caller owns the returned bytes.
+/// Structural failures and short reads return null; IO and allocation errors
+/// remain errors so a cache can retry a transient failure on the next query.
+pub fn readTable(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    face_index: u32,
+    stats: ?*ReadStats,
+) !?[]u8 {
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
+    if (stats) |counts| counts.file_opens += 1;
 
     var header: [12]u8 = undefined;
-    if (try file.readPositionalAll(io, &header, 0) != header.len) return false;
+    if (try read(io, file, &header, 0, stats) != header.len) return null;
     var sfnt_offset: u64 = 0;
     if (std.mem.eql(u8, header[0..4], "ttcf")) {
         const num_fonts = std.mem.readInt(u32, header[8..12], .big);
-        if (face_index >= num_fonts) return false;
+        if (face_index >= num_fonts) return null;
         var offset_bytes: [4]u8 = undefined;
-        if (try file.readPositionalAll(io, &offset_bytes, 12 + @as(u64, face_index) * 4) != 4) return false;
+        if (try read(io, file, &offset_bytes, 12 + @as(u64, face_index) * 4, stats) != 4) return null;
         sfnt_offset = std.mem.readInt(u32, &offset_bytes, .big);
     } else if (face_index != 0) {
-        return false;
+        return null;
     }
 
     var sfnt_header: [12]u8 = undefined;
-    if (try file.readPositionalAll(io, &sfnt_header, sfnt_offset) != sfnt_header.len) return false;
+    if (try read(io, file, &sfnt_header, sfnt_offset, stats) != sfnt_header.len) return null;
     const num_tables = std.mem.readInt(u16, sfnt_header[4..6], .big);
-    if (num_tables == 0 or num_tables > 512) return false;
+    if (num_tables == 0 or num_tables > 512) return null;
     var directory: [512 * 16]u8 = undefined;
     const directory_len = @as(usize, num_tables) * 16;
-    if (try file.readPositionalAll(io, directory[0..directory_len], sfnt_offset + 12) != directory_len) {
-        return false;
+    if (try read(io, file, directory[0..directory_len], sfnt_offset + 12, stats) != directory_len) {
+        return null;
     }
     var cmap_offset: u32 = 0;
     var cmap_length: u32 = 0;
@@ -49,14 +73,26 @@ pub fn coversCodepoint(
         cmap_length = std.mem.readInt(u32, record[12..16], .big);
         break;
     }
-    if (cmap_offset == 0 or cmap_length < 4 or cmap_length > max_cmap_bytes) return false;
-    const cmap_bytes = try std.heap.page_allocator.alloc(u8, cmap_length);
-    defer std.heap.page_allocator.free(cmap_bytes);
-    if (try file.readPositionalAll(io, cmap_bytes, cmap_offset) != cmap_length) return false;
-    return subtableCovers(cmap_bytes, codepoint);
+    if (cmap_offset == 0 or cmap_length < 4 or cmap_length > max_cmap_bytes) return null;
+    const cmap_bytes = try allocator.alloc(u8, cmap_length);
+    errdefer allocator.free(cmap_bytes);
+    if (try read(io, file, cmap_bytes, cmap_offset, stats) != cmap_length) {
+        allocator.free(cmap_bytes);
+        return null;
+    }
+    return cmap_bytes;
 }
 
-fn subtableCovers(cmap: []const u8, codepoint: u21) bool {
+fn read(io: std.Io, file: std.Io.File, bytes: []u8, offset: u64, stats: ?*ReadStats) !usize {
+    if (stats) |counts| counts.read_calls += 1;
+    const len = try file.readPositionalAll(io, bytes, offset);
+    if (stats) |counts| counts.bytes_read += len;
+    return len;
+}
+
+/// Query retained table bytes with the same subtable preference and malformed
+/// table handling as the uncached file reader.
+pub fn tableCovers(cmap: []const u8, codepoint: u21) bool {
     if (cmap.len < 4) return false;
     const count = readU16(cmap, 2) orelse return false;
     if (count == 0 or count > 1024) return false;
@@ -70,7 +106,7 @@ fn subtableCovers(cmap: []const u8, codepoint: u21) bool {
         const platform = readU16(cmap, record) orelse continue;
         const encoding = readU16(cmap, record + 2) orelse continue;
         const offset = readU32(cmap, record + 4) orelse continue;
-        if (offset + 2 > cmap.len) continue;
+        if (@as(u64, offset) + 2 > cmap.len) continue;
         const format = readU16(cmap, offset) orelse continue;
         const score = subtableScore(platform, encoding, format);
         if (score > best_score) {
@@ -169,7 +205,7 @@ fn format12Covers(subtable: []const u8, codepoint: u21, many_to_one: bool) bool 
         const end = readU32(subtable, group + 4) orelse return false;
         if (codepoint < start or codepoint > end) continue;
         const start_glyph = readU32(subtable, group + 8) orelse return false;
-        const glyph = if (many_to_one) start_glyph else start_glyph + (@as(u32, codepoint) - start);
+        const glyph = if (many_to_one) start_glyph else std.math.add(u32, start_glyph, @as(u32, codepoint) - start) catch return false;
         return glyph != 0;
     }
     return false;
@@ -233,5 +269,25 @@ test "subtable selection prefers format 12 over format 4" {
     std.mem.writeInt(u16, cmap[34..36], 0, .big);
     std.mem.writeInt(u16, cmap[36..38], 0, .big);
     std.mem.writeInt(u16, cmap[38..40], 0, .big);
-    try std.testing.expect(!subtableCovers(&cmap, 'A'));
+    try std.testing.expect(!tableCovers(&cmap, 'A'));
+}
+
+test "coverage cmap malformed offsets and overflowing glyph groups return false" {
+    var table = [_]u8{0} ** 40;
+    std.mem.writeInt(u16, table[2..4], 1, .big);
+    std.mem.writeInt(u16, table[4..6], 3, .big);
+    std.mem.writeInt(u16, table[6..8], 10, .big);
+    std.mem.writeInt(u32, table[8..12], std.math.maxInt(u32), .big);
+    try std.testing.expect(!tableCovers(&table, 'A'));
+    std.mem.writeInt(u32, table[8..12], 12, .big);
+    std.mem.writeInt(u16, table[12..14], 12, .big);
+    std.mem.writeInt(u32, table[24..28], 1, .big);
+    std.mem.writeInt(u32, table[28..32], 'A', .big);
+    std.mem.writeInt(u32, table[32..36], 'Z', .big);
+    std.mem.writeInt(u32, table[36..40], std.math.maxInt(u32), .big);
+    try std.testing.expect(tableCovers(&table, 'A'));
+    try std.testing.expect(!tableCovers(&table, 'B'));
+    // Format 13 uses a constant glyph and cannot overflow from the codepoint.
+    std.mem.writeInt(u16, table[12..14], 13, .big);
+    try std.testing.expect(tableCovers(&table, 'B'));
 }
