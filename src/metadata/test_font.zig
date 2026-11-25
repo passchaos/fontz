@@ -24,6 +24,7 @@ pub const TestFontOptions = struct {
     weight: u16 = 400,
     width_class: u16 = 5,
     italic: bool = false,
+    oblique: bool = false,
     monospaced: bool = false,
     instances: []const TestInstance = &.{},
     /// Optional synthetic `opsz` axis range.
@@ -176,6 +177,7 @@ pub fn buildTestFont(allocator: std.mem.Allocator, options: TestFontOptions) ![]
     std.mem.writeInt(u16, os2[6..8], options.width_class, .big);
     var selection: u16 = 0;
     if (options.italic) selection |= 0x0001;
+    if (options.oblique) selection |= 0x0200;
     std.mem.writeInt(u16, os2[62..64], selection, .big);
     const post = bytes[post_offset..][0..post_len];
     std.mem.writeInt(u32, post[0..4], 0x00020000, .big);

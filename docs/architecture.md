@@ -41,8 +41,20 @@ Units:
 - `required_codepoint`: Unicode scalar value. The pure provider verifies it
   against the candidate's `cmap`.
 
-Face selection follows the CSS Fonts Level 3 order: stretch, then style, then
-weight. The metadata index implements this directly.
+Face selection follows the CSS Fonts Level 4 order: stretch, then style, then
+weight, retaining exact distances within each search phase. Below 400, weights
+are searched downwards before upwards. In the inclusive range 400..500, weights
+from the request through 500 are searched upwards first, then lower weights
+downwards, then weights above 500 upwards. Above 500, weights are searched
+upwards before downwards. Thus a request of 450 selects 500 over 400, and a
+request of 470 selects 480 over both 400 and 500. Exact trait ties retain catalog
+order; optical-size ranking still follows these three attributes.
+
+`zig build test-coverage-matching -j1` exercises actual SFNT/TTC descriptors,
+the entire 400..500 interval, intermediate weights, both stretch directions,
+coverage screening, PostScript overrides, and named-instance/collection face
+identity. The same gate includes cold cmap I/O, cache hits and allocation-failure
+controls.
 
 ## Discovery
 

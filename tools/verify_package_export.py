@@ -53,7 +53,8 @@ def matching_test_counts(package, output):
     # Explicit named counts catch a gate accidentally rooted at src/root.zig,
     # which can otherwise succeed after executing only declaration checks.
     return test_counts(package, output, "test-coverage-matching",
-                       ["src/coverage_matching_tests.zig", "src/variation_matching_tests.zig"],
+                       ["src/coverage_matching_tests.zig", "src/variation_matching_tests.zig",
+                        "src/css_matching_tests.zig"],
                        "coverage matching", 2)
 
 

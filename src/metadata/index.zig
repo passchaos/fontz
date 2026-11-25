@@ -8,7 +8,7 @@
 //!
 //! The index keeps every localized family name plus PostScript/full names and
 //! face attributes so callers can resolve the same face identity that Cangjie
-//! will parse later. Face selection follows the CSS Fonts Level 3 order:
+//! will parse later. Face selection follows the CSS Fonts Level 4 order:
 //! `font-stretch` first, then `font-style`, then `font-weight`.
 
 const std = @import("std");

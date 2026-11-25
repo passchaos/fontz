@@ -34,7 +34,7 @@ pub fn selectFiltered(
     return selectBestFace(Face, faces, eligible[0..count], query);
 }
 
-/// CSS Fonts Level 3 face selection over a candidate index list.
+/// CSS Fonts Level 4 face selection over a candidate index list.
 pub fn selectBestFace(
     comptime Face: type,
     faces: []const Face,
@@ -141,59 +141,30 @@ fn matchingWeight(
     style: types.Style,
     requested: u16,
 ) ?u16 {
-    const eligible = struct {
-        fn check(faces_: []const Face, indices_: []const u32, stretch_: u16, style_: types.Style, weight_: u16) bool {
-            for (indices_) |index| {
-                if (index >= faces_.len) continue;
-                const face = &faces_[index];
-                if (face.stretch == stretch_ and face.style == style_ and face.weight == weight_) return true;
-            }
-            return false;
-        }
-    };
-    if (eligible.check(faces, indices, stretch, style, requested)) return requested;
-    if (requested >= 400 and requested < 450 and eligible.check(faces, indices, stretch, style, 500)) {
-        return 500;
-    }
-    if (requested >= 450 and requested <= 500 and eligible.check(faces, indices, stretch, style, 400)) {
-        return 400;
-    }
-    if (requested <= 500) {
-        var below: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const face = &faces[index];
-            if (face.stretch != stretch or face.style != style) continue;
-            const value = face.weight;
-            if (value <= requested and (below == null or value > below.?)) below = value;
-        }
-        if (below) |value| return value;
-        var above: ?u16 = null;
-        for (indices) |index| {
-            if (index >= faces.len) continue;
-            const face = &faces[index];
-            if (face.stretch != stretch or face.style != style) continue;
-            const value = face.weight;
-            if (value > requested and (above == null or value < above.?)) above = value;
-        }
-        return above;
-    }
-    var above: ?u16 = null;
+    var best: ?u16 = null;
+    var best_rank: u32 = std.math.maxInt(u32);
     for (indices) |index| {
         if (index >= faces.len) continue;
         const face = &faces[index];
         if (face.stretch != stretch or face.style != style) continue;
-        const value = face.weight;
-        if (value >= requested and (above == null or value < above.?)) above = value;
+        const rank = weightRank(face.weight, requested);
+        if (rank < best_rank) {
+            best = face.weight;
+            best_rank = rank;
+        }
     }
-    if (above) |value| return value;
-    var below: ?u16 = null;
-    for (indices) |index| {
-        if (index >= faces.len) continue;
-        const face = &faces[index];
-        if (face.stretch != stretch or face.style != style) continue;
-        const value = face.weight;
-        if (value < requested and (below == null or value > below.?)) below = value;
-    }
-    return below;
+    return best;
+}
+
+/// Each phase retains the complete u16 distance. For requests in [400, 500],
+/// search upwards only as far as 500, then downwards, then above 500.
+fn weightRank(actual: u16, requested: u16) u32 {
+    const distance: u32 = if (actual > requested) actual - requested else requested - actual;
+    const phase: u32 = if (requested < 400)
+        @intFromBool(actual > requested)
+    else if (requested <= 500)
+        (if (actual >= requested and actual <= 500) @as(u32, 0) else if (actual < requested) @as(u32, 1) else @as(u32, 2))
+    else
+        @intFromBool(actual < requested);
+    return (phase << 16) | distance;
 }

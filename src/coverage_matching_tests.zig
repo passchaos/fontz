@@ -13,6 +13,7 @@ const allocator = std.testing.allocator;
 
 comptime {
     _ = @import("variation_matching_tests.zig");
+    _ = @import("css_matching_tests.zig");
 }
 
 const Fixture = struct {
