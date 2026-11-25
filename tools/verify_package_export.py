@@ -159,6 +159,12 @@ def verify(args):
             gate_results["prepared-cmap"] = test_counts(package, output, "test-prepared-cmap",
                 ["src/metadata/prepared_tests.zig"], "prepared cmap", 1)
             gates.append("prepared-cmap")
+        if args.unicode_cmap_tests:
+            output = run(base + ["test-unicode-cmap", "-j1", "--summary", "all"], package, log=True)
+            gate_results["unicode-cmap"] = test_counts(package, output, "test-unicode-cmap",
+                ["src/metadata/numeric_unit_tests.zig", "src/metadata/numeric_cache_tests.zig",
+                 "src/metadata/numeric_discovery_tests.zig"], "unicode cmap", 2)
+            gates.append("unicode-cmap")
         if args.macos_oracle:
             if sys.platform != "darwin":
                 raise RuntimeError("CoreText oracle requires a macOS host")
@@ -184,6 +190,7 @@ def main():
     parser.add_argument("--coverage-matching-tests", action="store_true")
     parser.add_argument("--variation-sequence-tests", action="store_true")
     parser.add_argument("--prepared-cmap-tests", action="store_true")
+    parser.add_argument("--unicode-cmap-tests", action="store_true")
     parser.add_argument("--macos-oracle", action="store_true")
     args = parser.parse_args()
     try:

@@ -262,3 +262,10 @@ linear behavior; variation sequences keep their strict coverage path. Run
 `zig build test-prepared-cmap test-coverage-matching test-variation-sequences -j1`
 for the focused gates. See [the lookup measurements](docs/benchmarks/prepared-cmap-lookup.md)
 for matched public-cache benchmarks, preparation costs, and resource accounting.
+
+Unicode cmap2/8/10 discovery now qualifies every standard eligible new subtable
+against maxp, with retained proof shared by scalar and variation queries. Mixed
+tables use the consuming Face's default priority; contexts without these new
+records preserve existing Fontz behavior. Run `zig build test-unicode-cmap -j1`
+for the named owner, or the export verifier with `--unicode-cmap-tests`.
+See [the Unicode cmap discovery contract](docs/unicode-cmap-discovery.md).

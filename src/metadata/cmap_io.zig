@@ -1,5 +1,6 @@
 //! Bounded sfnt cmap and lazy maxp reads; scalar cold IO stays unchanged.
 const std = @import("std");
+const selection = @import("cmap_selection.zig");
 
 pub const max_cmap_bytes = 16 * 1024 * 1024;
 
@@ -27,6 +28,8 @@ pub fn readTable(
 pub const CoverageData = struct {
     table: ?[]u8 = null,
     num_glyphs: ?u16 = null,
+    glyph_count_loaded: bool = false,
+    extended_context: bool = false,
 };
 
 pub fn readCoverageData(
@@ -37,6 +40,15 @@ pub fn readCoverageData(
     with_glyph_count: bool,
     stats: ?*ReadStats,
 ) !CoverageData {
+    return readData(io, allocator, path, face_index, with_glyph_count, false, stats);
+}
+
+/// Load maxp when any standard eligible Unicode format2/8/10 record exists.
+pub fn readScalarCoverageData(io: std.Io, allocator: std.mem.Allocator, path: []const u8, face_index: u32, stats: ?*ReadStats) !CoverageData {
+    return readData(io, allocator, path, face_index, false, true, stats);
+}
+
+fn readData(io: std.Io, allocator: std.mem.Allocator, path: []const u8, face_index: u32, with_glyph_count: bool, scalar: bool, stats: ?*ReadStats) !CoverageData {
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
     if (stats) |counts| counts.file_opens += 1;
@@ -88,11 +100,13 @@ pub fn readCoverageData(
         allocator.free(cmap_bytes);
         return .{};
     }
-    const num_glyphs = if (with_glyph_count)
+    const context = selection.hasExtendedContext(cmap_bytes);
+    const needs_count = with_glyph_count or (scalar and context);
+    const num_glyphs = if (needs_count)
         try readMaxp(io, file, maxp_offset, maxp_length, stats)
     else
         null;
-    return .{ .table = cmap_bytes, .num_glyphs = num_glyphs };
+    return .{ .table = cmap_bytes, .num_glyphs = num_glyphs, .glyph_count_loaded = needs_count, .extended_context = context };
 }
 
 fn read(io: std.Io, file: std.Io.File, bytes: []u8, offset: u64, stats: ?*ReadStats) !usize {

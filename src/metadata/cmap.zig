@@ -1,7 +1,7 @@
 //! Minimal pure-Zig sfnt `cmap` coverage reader.
 //!
-//! Supports the common Unicode subtables: format 4 (BMP), format 12/13
-//! (full repertoire), format 6, format 0 and variation sequences (format 14).
+//! Supports Unicode numeric subtables 0/2/4/6/8/10/12/13 and variation
+//! sequences (format14), with full qualification for new 2/8/10 contexts.
 //! Used by the pure-Zig discovery
 //! provider to prove that a candidate actually covers a codepoint.
 
@@ -10,17 +10,22 @@ const std = @import("std");
 const file_reader = @import("cmap_io.zig");
 const unicode = @import("../variation.zig");
 const variation = @import("cmap_variation.zig");
+const selection = @import("cmap_selection.zig");
+const numeric = @import("cmap_numeric.zig");
 pub const max_cmap_bytes = file_reader.max_cmap_bytes;
 pub const ReadStats = file_reader.ReadStats;
 pub const readTable = file_reader.readTable;
 pub const readCoverageData = file_reader.readCoverageData;
 pub const readGlyphCount = file_reader.readGlyphCount;
+pub const readScalarCoverageData = file_reader.readScalarCoverageData;
+pub const hasExtendedContext = selection.hasExtendedContext;
 
 pub fn coversCodepoint(io: std.Io, path: []const u8, face_index: u32, codepoint: u21) !bool {
     if (!unicode.isScalar(codepoint)) return false;
-    const table = (try readTable(io, std.heap.page_allocator, path, face_index, null)) orelse return false;
+    const data = try readScalarCoverageData(io, std.heap.page_allocator, path, face_index, null);
+    const table = data.table orelse return false;
     defer std.heap.page_allocator.free(table);
-    return tableCovers(table, codepoint);
+    return if (data.extended_context) tableCoversBounded(table, codepoint, data.num_glyphs orelse return false) else tableCovers(table, codepoint);
 }
 
 pub fn coversVariationSequence(io: std.Io, path: []const u8, face_index: u32, base: u21, selector: u21) !bool {
@@ -34,11 +39,40 @@ pub fn coversVariationSequence(io: std.Io, path: []const u8, face_index: u32, ba
 /// A nondefault mapping proves coverage independently of a nominal base glyph.
 /// Default mappings also require an in-bounds glyph in the chosen Unicode cmap.
 pub fn tableCoversVariationSequence(table: []const u8, base: u21, selector: u21, num_glyphs: u16) bool {
+    if (hasExtendedContext(table) and !extendedContextQualified(false, table, num_glyphs, null)) return false;
+    return tableCoversVariationValidated(table, base, selector, num_glyphs);
+}
+
+/// Owner has already proven every new standard subtable in this immutable cmap.
+pub fn tableCoversVariationValidated(table: []const u8, base: u21, selector: u21, num_glyphs: u16) bool {
     return switch (variation.lookup(table, base, selector, num_glyphs)) {
         .unsupported => false,
         .nondefault => true,
-        .default => if (tableGlyph(table, base, true)) |glyph| glyph < num_glyphs else false,
+        .default => defaultNominalValidatedCovers(table, base, num_glyphs),
     };
+}
+
+pub const variationMapping = variation.lookup;
+pub fn strictScalarSubtable(bytes: []const u8) ?selection.Subtable {
+    return selection.selectSubtable(false, bytes, true, null);
+}
+pub fn defaultNominalCovers(bytes: []const u8, cp: u21, num_glyphs: u16) bool {
+    const mapped = tableGlyphImpl(false, bytes, cp, true, num_glyphs, null) orelse return false;
+    return mapped < num_glyphs;
+}
+
+pub fn extendedContextQualified(comptime counted: bool, bytes: []const u8, count: u16, work: ?*selection.WorkStats) bool {
+    return count != 0 and numeric.validateContext(counted, bytes, count, work);
+}
+
+pub fn defaultNominalValidatedCovers(bytes: []const u8, cp: u21, count: u16) bool {
+    const selected = strictScalarSubtable(bytes) orelse return false;
+    const mapped = selectedGlyph(false, bytes, selected, cp, true, null) orelse return false;
+    return mapped < count;
+}
+
+pub fn scalarSelectedValidatedCovers(comptime counted: bool, bytes: []const u8, selected: selection.Subtable, cp: u21, work: ?*selection.WorkStats) bool {
+    return selectedGlyph(counted, bytes, selected, cp, false, work) != null;
 }
 
 comptime {
@@ -51,75 +85,71 @@ pub fn tableCovers(cmap: []const u8, codepoint: u21) bool {
     return tableGlyph(cmap, codepoint, false) != null;
 }
 
-pub const WorkStats = struct {
-    encoding_records: u64 = 0,
-    group_visits: u64 = 0,
-    preparation_visits: u64 = 0,
-    binary_queries: u64 = 0,
-    linear_queries: u64 = 0,
-};
+pub const WorkStats = selection.WorkStats;
+pub const Subtable = selection.Subtable;
+pub const scalarSubtable = selection.scalarSubtable;
+pub const scalarSubtableCounted = selection.scalarSubtableCounted;
 
-pub const Subtable = struct { offset: u32, format: u16 };
-
-pub fn scalarSubtable(bytes: []const u8) ?Subtable {
-    return selectSubtable(false, bytes, false, null);
+pub fn scalarNeedsGlyphCount(bytes: []const u8) bool {
+    return hasExtendedContext(bytes);
 }
 
-pub fn scalarSubtableCounted(bytes: []const u8, work: *WorkStats) ?Subtable {
-    return selectSubtable(true, bytes, false, work);
+/// Qualify every standard eligible new subtable against maxp. Without a new
+/// context, historical scalar semantics remain independent of maxp.
+pub fn scalarTableQualified(bytes: []const u8, num_glyphs: u16) bool {
+    return scalarTableQualifiedImpl(false, bytes, num_glyphs, null);
 }
 
-fn selectSubtable(comptime counted: bool, cmap: []const u8, strict_length: bool, work: ?*WorkStats) ?Subtable {
-    if (cmap.len < 4) return null;
-    if (strict_length and readU16(cmap, 0) != 0) return null;
-    const count = readU16(cmap, 2) orelse return null;
-    if (count == 0 or count > 1024) return null;
-    if (cmap.len < 4 + @as(usize, count) * 8) return null;
+pub fn scalarTableQualifiedCounted(bytes: []const u8, num_glyphs: u16, work: *WorkStats) bool {
+    return scalarTableQualifiedImpl(true, bytes, num_glyphs, work);
+}
 
-    var best_offset: ?u32 = null;
-    var best_score: u8 = 0;
-    var index: usize = 0;
-    while (index < count) : (index += 1) {
-        if (counted) work.?.encoding_records += 1;
-        const record = 4 + index * 8;
-        const platform = readU16(cmap, record) orelse continue;
-        const encoding = readU16(cmap, record + 2) orelse continue;
-        if (strict_length and !(platform == 0 and encoding <= 6 and encoding != 5) and
-            !(platform == 3 and (encoding == 1 or encoding == 10))) continue;
-        const offset = readU32(cmap, record + 4) orelse continue;
-        if (strict_length and offset < 4 + @as(usize, count) * 8) return null;
-        if (@as(u64, offset) + 2 > cmap.len) continue;
-        const format = readU16(cmap, offset) orelse continue;
-        const score = subtableScore(platform, encoding, format);
-        if (score > best_score) {
-            best_score = score;
-            best_offset = offset;
-        }
-    }
-    const offset = best_offset orelse return null;
-    const format = readU16(cmap, offset) orelse return null;
-    return .{ .offset = offset, .format = format };
+fn scalarTableQualifiedImpl(comptime counted: bool, bytes: []const u8, num_glyphs: u16, work: ?*WorkStats) bool {
+    return extendedContextQualified(counted, bytes, num_glyphs, work);
+}
+
+pub fn newSubtableQualified(bytes: []const u8, selected: Subtable, count: u16) bool {
+    return count != 0 and numeric.isFormat(selected.format) and numeric.validate(bytes[selected.offset..], selected.format, count);
+}
+
+/// Lookup against an immutable new subtable already fully qualified by owner.
+pub fn newScalarValidatedCovers(bytes: []const u8, offset: u32, format: u16, cp: u21) bool {
+    return numeric.glyphValidated(bytes[offset..], format, cp) != null;
+}
+
+/// Explicit bounded query: new formats prove their entire mapping domain.
+/// `tableCovers` alone proves only a cmap mapping, without maxp qualification.
+pub fn tableCoversBounded(bytes: []const u8, cp: u21, num_glyphs: u16) bool {
+    if (num_glyphs == 0) return false;
+    const mapped = tableGlyphImpl(false, bytes, cp, false, num_glyphs, null) orelse return false;
+    return mapped < num_glyphs;
 }
 
 /// Opt-in test/workload counter. Production calls instantiate no counters.
 pub fn tableCoversCounted(bytes: []const u8, codepoint: u21, work: *WorkStats) bool {
-    return tableGlyphImpl(true, bytes, codepoint, false, work) != null;
+    return tableGlyphImpl(true, bytes, codepoint, false, null, work) != null;
 }
 
 fn tableGlyph(cmap: []const u8, codepoint: u21, strict_length: bool) ?u32 {
-    return tableGlyphImpl(false, cmap, codepoint, strict_length, null);
+    return tableGlyphImpl(false, cmap, codepoint, strict_length, null, null);
 }
 
-fn tableGlyphImpl(comptime counted: bool, cmap: []const u8, codepoint: u21, strict_length: bool, work: ?*WorkStats) ?u32 {
+fn tableGlyphImpl(comptime counted: bool, cmap: []const u8, codepoint: u21, strict_length: bool, num_glyphs: ?u16, work: ?*WorkStats) ?u32 {
     if (!unicode.isScalar(codepoint)) return null;
-    const selected = selectSubtable(counted, cmap, strict_length, work) orelse return null;
+    const selected = selection.selectSubtable(counted, cmap, strict_length, work) orelse return null;
+    if (hasExtendedContext(cmap) and !numeric.validateContext(false, cmap, num_glyphs, @as(?*WorkStats, null))) return null;
+    return selectedGlyph(counted, cmap, selected, codepoint, strict_length, work);
+}
+
+fn selectedGlyph(comptime counted: bool, cmap: []const u8, selected: Subtable, codepoint: u21, strict_length: bool, work: ?*WorkStats) ?u32 {
+    if (!unicode.isScalar(codepoint)) return null;
     const offset = selected.offset;
     const format = selected.format;
     var subtable = cmap[offset..];
     if (strict_length) {
         // Nominal scalar queries retain their historical parser behavior.
         // A default UVS needs proof within the nominal subtable's own bounds.
-        const length: usize = if (format == 12 or format == 13)
+        const length: usize = if (format == 8 or format == 10 or format == 12 or format == 13)
             readU32(subtable, 4) orelse return null
         else
             readU16(subtable, 2) orelse return null;
@@ -128,27 +158,12 @@ fn tableGlyphImpl(comptime counted: bool, cmap: []const u8, codepoint: u21, stri
     }
     return switch (format) {
         0 => format0Glyph(subtable, codepoint),
+        2, 8, 10 => numeric.glyphValidated(subtable, format, codepoint),
         4 => format4Glyph(subtable, codepoint),
         6 => format6Glyph(subtable, codepoint),
         12, 13 => format12GlyphImpl(counted, subtable, codepoint, format == 13, work),
         else => null,
     };
-}
-
-fn subtableScore(platform: u16, encoding: u16, format: u16) u8 {
-    if (format == 12 or format == 13) {
-        if (platform == 3 and encoding == 10) return 100;
-        if (platform == 0 and (encoding == 4 or encoding == 6)) return 95;
-        return 60;
-    }
-    if (format == 4) {
-        if (platform == 3 and encoding == 1) return 80;
-        if (platform == 0 and (encoding == 3 or encoding == 4)) return 75;
-        return 40;
-    }
-    if (format == 6) return 30;
-    if (format == 0) return 10;
-    return 0;
 }
 
 fn format0Covers(subtable: []const u8, codepoint: u21) bool {

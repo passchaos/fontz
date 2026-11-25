@@ -35,8 +35,24 @@ const Entry = struct {
     table: ?[]u8,
     num_glyphs: ?u16,
     glyph_count_loaded: bool,
+    extended_context: bool,
+    context_proof: ?bool,
     scalar_plan: cmap_plan.Plan,
     stamp: u64,
+
+    fn qualifyContext(self: *Entry, comptime counted: bool, table: []const u8, work: ?*cmap.WorkStats) bool {
+        if (!self.extended_context) return true;
+        if (self.context_proof) |valid| return valid;
+        self.context_proof = if (self.num_glyphs) |count| cmap.extendedContextQualified(counted, table, count, work) else false;
+        return self.context_proof.?;
+    }
+
+    fn variationCovers(self: *Entry, comptime counted: bool, base: u21, selector: u21, work: ?*cmap.WorkStats) bool {
+        const table = self.table orelse return false;
+        const count = self.num_glyphs orelse return false;
+        if (!self.qualifyContext(counted, table, work)) return false;
+        return cmap.tableCoversVariationValidated(table, base, selector, count);
+    }
 
     fn bytes(self: Entry) usize {
         return self.path.len + if (self.table) |table| table.len else 0;
@@ -115,6 +131,10 @@ pub const Cache = struct {
         return self.covers(true, io, path, face_index, codepoint, null, generation, work);
     }
 
+    pub fn coversVariationSequenceCounted(self: *Cache, io: std.Io, path: []const u8, face_index: u32, base: u21, selector: u21, generation: u64, work: *cmap.WorkStats) !bool {
+        return self.covers(true, io, path, face_index, base, selector, generation, work);
+    }
+
     fn covers(
         self: *Cache,
         comptime counted: bool,
@@ -143,6 +163,14 @@ pub const Cache = struct {
             if (selector == null) {
                 const bytes = entry.table orelse return false;
                 if (entry.scalar_plan.order == .unprepared) entry.scalar_plan = cmap_plan.prepare(counted, bytes, work);
+                if (entry.extended_context) {
+                    if (!entry.glyph_count_loaded) {
+                        entry.num_glyphs = try cmap.readGlyphCount(io, path, face_index, &self.reads);
+                        entry.glyph_count_loaded = true;
+                    }
+                    if (!entry.qualifyContext(counted, bytes, work)) return false;
+                    if (entry.scalar_plan.order != .ordered) return cmap.scalarSelectedValidatedCovers(counted, bytes, .{ .offset = entry.scalar_plan.offset, .format = entry.scalar_plan.format }, codepoint, work);
+                }
                 return entry.scalar_plan.covers(counted, bytes, codepoint, work);
             }
             if (selector != null and entry.table != null and !entry.glyph_count_loaded) {
@@ -150,24 +178,36 @@ pub const Cache = struct {
                 entry.num_glyphs = try cmap.readGlyphCount(io, path, face_index, &self.reads);
                 entry.glyph_count_loaded = true;
             }
-            return coveredBy(counted, entry.table, entry.num_glyphs, codepoint, selector, work);
+            return entry.variationCovers(counted, codepoint, selector.?, work);
         }
         self.misses += 1;
-        const data = try cmap.readCoverageData(io, self.allocator, path, face_index, selector != null, &self.reads);
+        const data = if (selector == null)
+            try cmap.readScalarCoverageData(io, self.allocator, path, face_index, &self.reads)
+        else
+            try cmap.readCoverageData(io, self.allocator, path, face_index, true, &self.reads);
         const table = data.table;
         var adopted = false;
         defer if (!adopted) {
             if (table) |bytes| self.allocator.free(bytes);
         };
-        const covered = coveredBy(counted, table, data.num_glyphs, codepoint, selector, work);
+        const proof: ?bool = if (data.extended_context)
+            (if (data.num_glyphs) |count| cmap.extendedContextQualified(counted, table.?, count, work) else false)
+        else
+            null;
+        const covered = if (proof) |qualified| blk: {
+            if (!qualified) break :blk false;
+            if (selector) |vs| break :blk cmap.tableCoversVariationValidated(table.?, codepoint, vs, data.num_glyphs.?);
+            const selected = cmap.scalarSubtable(table.?) orelse break :blk false;
+            break :blk cmap.scalarSelectedValidatedCovers(counted, table.?, selected, codepoint, work);
+        } else coveredBy(counted, table, data.num_glyphs, codepoint, selector, work);
         // Cache installation is best effort. A failed key/entry allocation must
         // not turn a successfully read glyph into a missing glyph.
-        adopted = self.put(counted, path, face_index, table, data.num_glyphs, selector != null, selector == null, work) catch false;
+        adopted = self.put(counted, path, face_index, table, data.num_glyphs, data.glyph_count_loaded, selector == null, data.extended_context, proof, work) catch false;
         return covered;
     }
 
     /// Adopts table only on true. Oversized/disabled caches query uncached.
-    fn put(self: *Cache, comptime counted: bool, path: []const u8, face_index: u32, table: ?[]u8, num_glyphs: ?u16, glyph_count_loaded: bool, prepare_scalar: bool, work: ?*cmap.WorkStats) !bool {
+    fn put(self: *Cache, comptime counted: bool, path: []const u8, face_index: u32, table: ?[]u8, num_glyphs: ?u16, glyph_count_loaded: bool, prepare_scalar: bool, extended_context: bool, context_proof: ?bool, work: ?*cmap.WorkStats) !bool {
         const bytes = std.math.add(usize, path.len, if (table) |data| data.len else 0) catch return false;
         if (self.limits.entries == 0 or bytes > self.limits.bytes) return false;
         const owned_path = try self.allocator.dupe(u8, path);
@@ -186,6 +226,8 @@ pub const Cache = struct {
             .table = table,
             .num_glyphs = num_glyphs,
             .glyph_count_loaded = glyph_count_loaded,
+            .extended_context = extended_context,
+            .context_proof = context_proof,
             .scalar_plan = if (prepare_scalar and table != null) cmap_plan.prepare(counted, table.?, work) else .{},
             .stamp = self.stamp,
         });
@@ -207,5 +249,6 @@ pub const Cache = struct {
 fn coveredBy(comptime counted: bool, table: ?[]const u8, num_glyphs: ?u16, base: u21, selector: ?u21, work: ?*cmap.WorkStats) bool {
     const bytes = table orelse return false;
     if (selector) |value| return cmap.tableCoversVariationSequence(bytes, base, value, num_glyphs orelse return false);
+    if (cmap.scalarNeedsGlyphCount(bytes)) return cmap.tableCoversBounded(bytes, base, num_glyphs orelse return false);
     return if (counted) cmap.tableCoversCounted(bytes, base, work.?) else cmap.tableCovers(bytes, base);
 }

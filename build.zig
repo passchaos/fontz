@@ -56,6 +56,19 @@ pub fn build(b: *std.Build) void {
     prepared_step.dependOn(&run_prepared_tests.step);
     test_step.dependOn(&run_prepared_tests.step);
 
+    const unicode_cmap_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/unicode_cmap_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"unicode cmap"},
+    });
+    const run_unicode_cmap_tests = b.addRunArtifact(unicode_cmap_tests);
+    const unicode_cmap_step = b.step("test-unicode-cmap", "Run Unicode format2/8/10 grammar, eligibility, and discovery regressions");
+    unicode_cmap_step.dependOn(&run_unicode_cmap_tests.step);
+    test_step.dependOn(&run_unicode_cmap_tests.step);
+
     const cmap_bench = b.addExecutable(.{
         .name = "cmap-lookup-bench",
         .root_module = b.createModule(.{
