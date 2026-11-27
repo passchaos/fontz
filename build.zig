@@ -81,6 +81,24 @@ pub fn build(b: *std.Build) void {
     const cmap_bench_step = b.step("bench-cmap", "Build the existing coverage-cache scalar lookup benchmark");
     cmap_bench_step.dependOn(&install_cmap_bench.step);
 
+    const discovery_bench = b.addExecutable(.{
+        .name = "discovery-startup-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/discovery_startup_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run_discovery_bench = b.addRunArtifact(discovery_bench);
+    // The first run populates the persistent metadata cache and the second
+    // measures the warm path; the step must execute every time.
+    run_discovery_bench.has_side_effects = true;
+    const discovery_bench_step = b.step(
+        "bench-discovery",
+        "Measure cold/warm system-font metadata index startup",
+    );
+    discovery_bench_step.dependOn(&run_discovery_bench.step);
+
     const variation_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/variation_sequence_tests.zig"),

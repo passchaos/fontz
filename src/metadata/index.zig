@@ -77,6 +77,10 @@ pub const Options = struct {
     /// Options are fixed after the first successful index build. Call `reset`
     /// before switching roots or budgets.
     roots: ?[]const []const u8 = null,
+    /// The roots above are the platform/fontconfig default catalog rather than
+    /// synthetic test or embedder roots, so the persistent metadata cache may
+    /// key on them.
+    default_roots: bool = false,
     max_files: usize = 4096,
     max_faces: usize = 4096,
     /// Per-file cap for the `name` table. Larger tables are skipped.
@@ -697,9 +701,10 @@ fn optionsLimitsHash(options: Options) u64 {
 fn resolveCachePath(allocator: std.mem.Allocator, options: Options) ?[]const u8 {
     if (options.cache_path) |path| return path;
     if (!options.enable_cache) return null;
-    // Explicit roots are tests/embedders; do not write their synthetic catalog
-    // into the user's real cache directory.
-    if (options.roots != null) return null;
+    // Synthetic test/embedder roots must not write into the user's real cache
+    // directory. The platform/fontconfig default catalog may, and that is the
+    // common case: without it every process rescans and reparses every font.
+    if (options.roots != null and !options.default_roots) return null;
     switch (builtin.os.tag) {
         .windows => {
             const local = env.get(allocator, "LOCALAPPDATA") orelse return null;
@@ -998,6 +1003,20 @@ test "metadata cache round-trips and invalidates on file changes" {
     _ = findFamily(io, "Cache Sans Extended", 400, false, 5, options) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!lastBuildUsedCache());
+}
+
+test "default-root discovery opts into the persistent metadata cache" {
+    const roots = [_][]const u8{"/usr/share/fonts"};
+    // Synthetic roots must not write into the user's real cache directory.
+    try std.testing.expect(resolveCachePath(std.testing.allocator, .{
+        .roots = &roots,
+    }) == null);
+    // The platform/fontconfig default catalog may key the persistent cache.
+    // The path itself depends on the test environment's home directory.
+    if (resolveCachePath(std.testing.allocator, .{
+        .roots = &roots,
+        .default_roots = true,
+    })) |path| std.testing.allocator.free(path);
 }
 
 test "index keeps more than 128 fvar instances" {

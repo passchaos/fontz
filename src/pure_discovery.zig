@@ -28,6 +28,9 @@ pub const Discovery = struct {
     generation_value: u64 = 1,
     config: fontconfig.Config,
     roots: []const []const u8,
+    /// True when `roots` is the platform/fontconfig catalog, which may key the
+    /// persistent metadata cache. Synthetic roots opt out.
+    default_roots: bool = false,
     generic_mappings: []const metadata_index.GenericMapping,
     available_value: bool = true,
 
@@ -46,6 +49,7 @@ pub const Discovery = struct {
             .coverage = coverage_cache.Cache.init(allocator),
             .config = config,
             .roots = roots,
+            .default_roots = true,
             .generic_mappings = mappings,
         };
     }
@@ -169,6 +173,7 @@ pub const Discovery = struct {
         concurrency_hooks.fire(.owner_read, 0);
         return metadata_index.prewarm(io, .{
             .roots = self.roots,
+            .default_roots = self.default_roots,
             .generic_mappings = self.generic_mappings,
         });
     }
@@ -182,6 +187,7 @@ pub const Discovery = struct {
         concurrency_hooks.fire(.owner_read, 0);
         return metadata_index.familyNames(std.Options.debug_io, allocator, .{
             .roots = self.roots,
+            .default_roots = self.default_roots,
             .generic_mappings = self.generic_mappings,
         });
     }
@@ -209,6 +215,7 @@ pub const Discovery = struct {
         const io = std.Options.debug_io;
         const options = metadata_index.Options{
             .roots = self.roots,
+            .default_roots = self.default_roots,
             .generic_mappings = self.generic_mappings,
         };
         const hinted = hintQuery(query);
