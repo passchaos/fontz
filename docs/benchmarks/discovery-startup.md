@@ -66,7 +66,7 @@ fontconfig) the five roles resolve to five distinct files:
 
 Because the paths are distinct, per-role install deduplication would not save
 work here. The remaining startup cost is the eager parse/hash of every role
-(notably the CJK collection and the emoji bitmap tables). Zui's headless font
-install now exposes `lazy_fallback_roles`, which installs the CJK/emoji/symbol
-roles on the first text that needs them; its receipt drops `--frames=1` wall
-time from 0.09-0.10 s to 0.01 s.
+(notably the CJK collection and the emoji bitmap tables). Zui's headless
+session and windowed renderer now expose `lazy_fallback_roles`, which installs
+the CJK/emoji/symbol roles on the first text that needs them; the headless
+receipt drops `--frames=1` wall time from 0.09-0.10 s to 0.01 s.
