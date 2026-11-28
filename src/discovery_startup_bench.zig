@@ -27,4 +27,16 @@ pub fn main(init: std.process.Init) !void {
             families.len,
         },
     );
+    const roles = [_]fontz.Role{ .ui, .cjk, .emoji, .monospace, .symbol };
+    for (roles) |role| {
+        var resolution = discovery.resolveRole(allocator, role, null) catch continue;
+        defer resolution.deinit();
+        const first = if (resolution.candidates.len != 0) resolution.candidates[0].path else "";
+        std.debug.print("role {s}: provider={s} candidates={} first={s}\n", .{
+            @tagName(role),
+            @tagName(resolution.provider),
+            resolution.candidates.len,
+            first,
+        });
+    }
 }

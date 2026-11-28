@@ -49,3 +49,23 @@ zig build check             # Windows/macOS provider compile
 cache isolates positive negative base selector and scalar", expected 0
 candidates, found 1) that also reproduces with these changes stashed. The new
 `default-root discovery opts into the persistent metadata cache` test passes.
+
+## Role font selection
+
+`zig build bench-discovery` also prints the first resolved candidate for each
+role through the same metadata index. On the measurement host (Linux,
+fontconfig) the five roles resolve to five distinct files:
+
+| Role | First candidate |
+| --- | --- |
+| ui | `/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf` |
+| cjk | `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` |
+| emoji | `/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf` |
+| monospace | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` |
+| symbol | `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` |
+
+Because the paths are distinct, per-role install deduplication would not save
+work here. The remaining startup cost is the eager parse/hash of every role
+(notably the CJK collection and the emoji bitmap tables), so the useful next
+step is on-demand role installation once the text layer exposes a codepoint
+coverage query.
